@@ -4,6 +4,11 @@ device: auto            # auto | cuda | cpu
 models_dir: models
 default_language: ru    # ru | kk — язык фоновых предупреждений до первой команды
 
+web:
+  enabled: true                 # локальный интерфейс в браузере
+  host: 127.0.0.1               # 0.0.0.0 — открыть для других устройств в сети
+  port: 8765
+
 camera:
   index: 0
   width: 640

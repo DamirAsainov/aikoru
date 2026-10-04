@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIKORU</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <img src="eye.svg" class="eye" alt="">
+      <span class="wordmark">AIKORU</span>
+    </div>
+    <div class="status" aria-label="Состояние">
+      <span class="chip" id="conn"><i class="dot"></i><span>подключение…</span></span>
+      <span class="chip mono" id="device">—</span>
+      <button class="chip toggle" id="pause" aria-pressed="false">Подсказки: вкл</button>
+    </div>
+  </header>
+
+  <main class="grid">
+    <section class="card video-card" aria-label="Камера">
+      <div class="card-head">
+        <h2>Камера</h2>
+        <span class="mono muted" id="track-count">0 объектов</span>
+      </div>
+      <div class="video">
+        <img id="stream" alt="Видео с камеры">
+        <canvas id="overlay" aria-hidden="true"></canvas>
+        <div class="video-empty" id="video-empty" hidden>Нет видео</div>
+      </div>
+      <ul class="tracks" id="tracks" aria-label="Объекты в кадре"></ul>
+    </section>
+
+    <section class="card feed-card" aria-label="Эфир">
+      <div class="card-head">
+        <h2>Эфир</h2>
+        <span class="mono muted">что произносит AIKORU</span>
+      </div>
+      <ol class="feed" id="feed" aria-live="polite"></ol>
+    </section>
+
+    <section class="card cmd-card" aria-label="Команды">
+      <div class="card-head">
+        <h2>Команда</h2>
+        <div class="seg" role="radiogroup" aria-label="Язык">
+          <button role="radio" data-lang="ru" aria-checked="true">RU</button>
+          <button role="radio" data-lang="kk" aria-checked="false">KK</button>
+        </div>
+      </div>
+      <form id="cmd-form" class="row">
+        <input id="cmd" type="text" autocomplete="off" placeholder="что вокруг · найди дверь · кто это">
+        <button class="btn primary" type="submit">Отправить</button>
+      </form>
+      <div class="quick" id="quick"></div>
+    </section>
+
+    <section class="card faces-card" aria-label="Знакомые">
+      <div class="card-head">
+        <h2>Знакомые</h2>
+        <span class="mono muted" id="faces-count">—</span>
+      </div>
+      <ul class="faces" id="faces"></ul>
+      <form id="remember-form" class="row">
+        <input id="remember-name" type="text" autocomplete="off" placeholder="Имя человека в кадре">
+        <button class="btn" type="submit">Запомнить</button>
+      </form>
+      <p class="hint">Человек должен смотреть в камеру. Данные лиц хранятся только на этом устройстве.</p>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 
 
 class Assistant:
-    def __init__(self, cfg: dict, voice_input: bool = True, show: bool = False):
+    def __init__(self, cfg: dict, voice_input: bool = True, show: bool = False, web: bool = True):
         from .camera import Camera
         from .detector import Detector
         from .translator import Translator
@@ -84,6 +84,12 @@ class Assistant:
         self._busy = threading.Event()   # идёт обработка команды
         self._running = False
         self._last_dets = []
+        self.web = None
+        w = cfg.get("web", {})
+        if web and w.get("enabled", True):
+            from .web import WebUI
+
+            self.web = WebUI(self, w.get("host", "127.0.0.1"), w.get("port", 8765))
 
     def p(self, key: str, lang: str | None = None) -> str:
         return lexicon.PHRASES[lang or self.lang][key]
@@ -95,6 +101,9 @@ class Assistant:
         threading.Thread(target=self._command_loop, name="commands", daemon=True).start()
         if self.voice:
             self.voice.start()
+        if self.web:
+            self.web.start()
+            print(f"Веб-интерфейс: {self.web.url}")
         self.tts.say(self.p("ready"), self.lang)
         try:
             if self.voice:
@@ -105,6 +114,8 @@ class Assistant:
             self._running = False
             if self.voice:
                 self.voice.stop()
+            if self.web:
+                self.web.stop()
             self.camera.close()
             cv2.destroyAllWindows()
 
@@ -176,6 +187,8 @@ class Assistant:
 
     def handle(self, cmd: Command) -> None:
         log.info("Команда: %s", cmd)
+        if self.web:
+            self.web.bus.publish("command", text=cmd.text, lang=cmd.lang, intent=cmd.intent)
         lang = self.lang = cmd.lang
         if cmd.intent == "pause":
             self.paused = True

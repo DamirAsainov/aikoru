@@ -54,12 +54,18 @@ class Speaker:
         self._seq = itertools.count()
         self._playing_priority: int | None = None
         self._interrupt = threading.Event()
+        self.listeners: list = []  # callback(text, lang, priority) — например, веб-интерфейс
         self._thread = threading.Thread(target=self._loop, name="tts", daemon=True)
         self._thread.start()
 
     # --- публичный API ---------------------------------------------------
     def say(self, text: str, lang: str, priority: int = ANSWER) -> None:
         log.info("[%s/p%d] %s", lang, priority, text)
+        for cb in self.listeners:
+            try:
+                cb(text, lang, priority)
+            except Exception:
+                log.exception("Ошибка подписчика TTS")
         self._q.put((priority, next(self._seq), time.time(), "text", (text, lang)))
         if self._playing_priority is not None and priority < self._playing_priority:
             self._interrupt.set()

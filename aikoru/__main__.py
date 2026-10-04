@@ -12,6 +12,7 @@ def main() -> None:
     ap.add_argument("--config", help="путь к config.yaml")
     ap.add_argument("--text", action="store_true", help="команды с клавиатуры вместо микрофона")
     ap.add_argument("--show", action="store_true", help="окно с видео и рамками (Esc — выход)")
+    ap.add_argument("--no-web", action="store_true", help="не запускать веб-интерфейс")
     ap.add_argument("--online", action="store_true", help="разрешить загрузку моделей из сети")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
@@ -33,7 +34,7 @@ def main() -> None:
     from .assistant import Assistant
 
     try:
-        Assistant(cfg, voice_input=not args.text, show=args.show).run()
+        Assistant(cfg, voice_input=not args.text, show=args.show, web=not args.no_web).run()
     except KeyboardInterrupt:
         pass
 
