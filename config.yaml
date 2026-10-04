@@ -1,0 +1,70 @@
+# AIKORU — конфигурация прототипа
+
+device: auto            # auto | cuda | cpu
+models_dir: models
+default_language: ru    # ru | kk — язык фоновых предупреждений до первой команды
+
+camera:
+  index: 0
+  width: 640
+  height: 480
+
+detector:
+  weights: yoloe-11s-seg.pt     # скачивается ultralytics автоматически
+  conf: 0.30
+  scan_interval_s: 0.3          # фоновый трекинг: ~3 кадра/с (0 — максимально часто)
+  tracker: bytetrack.yaml       # bytetrack.yaml | botsort.yaml (ultralytics)
+  # Голос звучит только при изменениях: новый объект ближе ~4 м, новый/знакомый
+  # человек, знакомый ушёл, опасность прямо по курсу.
+  # Стандартные объекты (английские названия — словарь YOLOE text prompts)
+  standard_classes:
+    - person
+    - car
+    - bus
+    - truck
+    - bicycle
+    - motorcycle
+    - door
+    - stairs
+    - traffic light
+    - crosswalk
+    - pole
+    - bench
+    - chair
+    - table
+    - trash can
+  # Объекты, о которых предупреждать как об опасности, если они близко и прямо
+  danger_classes: [car, bus, truck, bicycle, motorcycle, stairs, pole]
+
+faces:
+  enabled: true
+  db: data/faces.json           # локальная база знакомых лиц (биометрия, не в git)
+  threshold: 0.40               # косинусное сходство SFace (рекомендуемый минимум 0.363)
+  retry_interval_s: 0.5         # как часто пробовать узнать лицо нового человека
+  max_tries: 12                 # сколько попыток на один трек
+  unknown_after_s: 2.0          # через сколько секунд объявлять «незнакомый человек»
+  remember_samples: 3           # сколько кадров брать при «запомни»
+
+vlm:
+  repo: vikhyatk/moondream2
+  revision: "2025-06-21"
+  path: moondream2               # локальная папка внутри models/
+  caption_length: short          # short | normal
+
+translator:
+  repo: JustFrederik/nllb-200-distilled-600M-ct2-int8   # NLLB-200 600M, CTranslate2 int8
+  path: nllb-200-600M-ct2-int8
+
+voice:
+  wake_words: ["айкору", "ай кору", "айкөру", "ай көру", "айгуру", "икору"]
+  wake_threshold: 0.75           # нечёткое совпадение 0..1
+  vosk_models:
+    ru: vosk-model-small-ru-0.22
+    kk: vosk-model-small-kz-0.42
+  command_timeout_s: 6.0         # сколько ждать команду после слова активации
+  silence_end_s: 0.8             # пауза, завершающая команду (Silero VAD)
+
+tts:
+  model: v5_cis_base_nostress    # Silero v5 CIS: один голос на ru и kk
+  voice: zhadyra                 # -> kaz_zhadyra / ru_zhadyra
+  sample_rate: 48000

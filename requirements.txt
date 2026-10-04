@@ -1,0 +1,14 @@
+# torch/torchvision/torchaudio ставятся отдельно под вашу CUDA, см. README
+ultralytics>=8.3.150      # YOLOE
+transformers>=4.51,<5    # Moondream2 (remote code) не совместим с transformers 5.x
+accelerate
+sentencepiece
+vosk                      # STT ru + kk, слово активации
+lap                       # нужен ByteTrack (трекер ultralytics)
+silero-vad                # VAD
+silero-stress             # ударения для русского TTS
+sounddevice
+opencv-python
+pyyaml
+pillow
+numpy
