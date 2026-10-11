@@ -1,4 +1,4 @@
-"""Оркестратор AIKORU: камера + YOLOE + Moondream + перевод + голос."""
+"""Оркестратор AIKORU: камера + YOLOE + VLM + перевод + голос."""
 from __future__ import annotations
 
 import logging
@@ -6,6 +6,7 @@ import queue
 import re
 import threading
 import time
+from pathlib import Path
 
 import cv2
 
@@ -38,8 +39,9 @@ class Assistant:
         log.info("Загрузка YOLOE…")
         # Два экземпляра: трекер с постоянным набором классов (смена классов
         # сбросила бы треки) и детектор для запросов «найди …»
-        self.tracker = Detector(d["weights"], dev, d["conf"], d["standard_classes"], d["tracker"])
-        self.detector = Detector(d["weights"], dev, d["conf"])
+        imgsz = d.get("imgsz", 640)
+        self.tracker = Detector(d["weights"], dev, d["conf"], d["standard_classes"], d["tracker"], imgsz)
+        self.detector = Detector(d["weights"], dev, d["conf"], imgsz=imgsz)
         self.faces = None
         f = cfg.get("faces", {})
         if f.get("enabled"):
@@ -49,18 +51,25 @@ class Assistant:
                 self.faces = FaceBook(cfg["models_dir"], f["db"], f["threshold"])
             except FileNotFoundError as e:
                 log.warning("Распознавание лиц отключено: %s", e)
+        self.objects = None
+        if cfg.get("objects", {}).get("enabled"):
+            from .objects import ObjectBook
+
+            self.objects = ObjectBook(cfg["objects"]["db"])
         log.info("Загрузка переводчика (NLLB)…")
-        self.translator = Translator(cfg["translator"]["path"], dev)
-        log.info("Загрузка VLM (Moondream)…")
+        self.translator = Translator(cfg["translator"]["path"], cfg["translator"]["device"])
         v = cfg["vlm"]
-        self.vlm = SceneDescriber(v["path"], dev, v["caption_length"])
-        log.info("Прогрев моделей…")  # первый вызов Moondream/YOLOE в разы медленнее
+        log.info("Загрузка VLM (%s, %s)…", Path(v["path"]).name, v["device"])
+        self.vlm = SceneDescriber(v["path"], v["device"], v["image_tokens"], v["max_new_tokens"])
+        log.info("Прогрев моделей…")  # первый вызов VLM/YOLOE в разы медленнее
         import numpy as np
 
         blank = np.zeros((480, 640, 3), dtype=np.uint8)
         self.vlm.describe(blank)
         self.detector.detect(blank, ["door"])
         self.tracker.track(blank)
+        if self.objects is not None:  # первый визуальный промпт строит predictor (~1 с)
+            self.detector.visual_embedding([blank], [(200, 150, 440, 330)])
         log.info("Открываю камеру…")
         c = cfg["camera"]
         self.camera = Camera(c["index"], c["width"], c["height"])
@@ -79,7 +88,10 @@ class Assistant:
         from .scene import Scene
 
         self.paused = False
-        self.scene = Scene()
+        d = cfg["detector"]
+        # трек теряется после 2.5 пропущенных интервалов, иначе в спокойном режиме
+        # один пропуск детекции сбрасывал бы трек и объект объявлялся бы заново
+        self.scene = Scene(lost_after_s=max(1.5, 2.5 * d.get("idle_interval_s", 0)))
         self._commands: queue.Queue[Command | None] = queue.Queue()
         self._busy = threading.Event()   # идёт обработка команды
         self._running = False
@@ -199,15 +211,14 @@ class Assistant:
         elif cmd.intent == "describe":
             self.tts.say(self.p("looking"), lang, ANSWER)
             caption = self.vlm.describe(self.camera.read())
-            log.info("Moondream: %s", caption)
+            log.info("VLM: %s", caption)
             self.tts.say(self.translator.translate(caption, "en", lang), lang, ANSWER)
         elif cmd.intent == "find":
             self._find(cmd)
-        elif cmd.intent in ("who", "remember", "forget"):
-            if self.faces is None:
-                self.tts.say(self.p("faces_off", lang), lang, ANSWER)
-            else:
-                getattr(self, f"_{cmd.intent}")(cmd)
+        elif cmd.intent == "who" and self.faces is None                 or cmd.intent in ("remember", "forget", "memory") and self.faces is None and self.objects is None:
+            self.tts.say(self.p("faces_off", lang), lang, ANSWER)
+        elif cmd.intent in ("who", "remember", "forget", "memory"):
+            getattr(self, f"_{cmd.intent}")(cmd)
         elif cmd.intent == "ask":
             self.tts.say(self.p("looking"), lang, ANSWER)
             question = self.translator.translate(cmd.text, lang, "en")
@@ -217,17 +228,25 @@ class Assistant:
         else:
             self.tts.say(self.p("not_heard"), lang, ANSWER)
 
+    def _to_english(self, text: str, lang: str) -> str:
+        en = self.translator.translate(text, lang, "en").lower().strip(" .!?")
+        return re.sub(r"^(the|a|an|my)\s+", "", en)
+
     def _find(self, cmd: Command) -> None:
         lang = cmd.lang
-        if cmd.target_en:
-            target_en = cmd.target_en
+        mine = self.objects.match(cmd.target_raw or cmd.text) if self.objects else None
+        if mine:
+            # свой предмет: ищем по запомненному визуальному образцу, а не по тексту
+            target_en, spoken, pe = self.objects.db[mine]["cls"], mine, self.objects.pe(mine)
+            conf = self.cfg["objects"]["conf"]
+        elif cmd.target_en:
+            target_en, pe, conf = cmd.target_en, None, 0.2
             spoken = lexicon.object_name(target_en, lang)
         else:
-            target_en = self.translator.translate(cmd.target_raw, lang, "en").lower().strip(" .!?")
-            target_en = re.sub(r"^(the|a|an)\s+", "", target_en)
+            target_en, pe, conf = self._to_english(cmd.target_raw, lang), None, 0.2
             spoken = cmd.target_raw
-        log.info("Поиск: %r → %r", cmd.target_raw, target_en)
-        dets = self.detector.detect(self.camera.read(), [target_en], conf=0.2)
+        log.info("Поиск: %r → %r%s", cmd.target_raw, target_en, " (по образцу)" if mine else "")
+        dets = self.detector.detect(self.camera.read(), [target_en], conf=conf, pe=pe)
         self._last_dets = dets
         if not dets:
             obj = spoken if lang == "ru" else spoken.capitalize()
@@ -257,44 +276,105 @@ class Assistant:
         self.tts.say(lexicon.sentence("; ".join(items)) + ".", lang, ANSWER)
 
     def _remember(self, cmd: Command) -> None:
+        """«Запомни …»: лицо в кадре → человек, иначе (или по подсказке в команде) — предмет."""
         lang = cmd.lang
         if not cmd.name:
             self.tts.say(self.p("need_name", lang), lang, ANSWER)
             return
         frames = []
-        for _ in range(self.cfg["faces"]["remember_samples"]):
+        for _ in range(self.cfg["faces" if self.faces else "objects"]["remember_samples"]):
             frames.append(self.camera.read())
             time.sleep(0.3)
-        if self.faces.remember(frames, cmd.name) == 0:
-            self.tts.say(self.p("no_face", lang), lang, ANSWER)
-            return
-        # человек, который сейчас ближе всех, теперь знакомый — не объявлять его заново
-        people = [t for t in self.scene.tracks.values() if t.name == "person"]
-        if people:
-            nearest = min(people, key=lambda t: t.det.meters or 99)
-            nearest.identity, nearest.announced = cmd.name, True
-        self.tts.say(self.p("remembered", lang).format(name=cmd.name), lang, ANSWER)
+        if cmd.obj is not True and self.faces:
+            if self.faces.remember(frames, cmd.name):
+                # человек, который сейчас ближе всех, теперь знакомый — не объявлять его заново
+                people = [t for t in self.scene.tracks.values() if t.name == "person"]
+                if people:
+                    nearest = min(people, key=lambda t: t.det.meters or 99)
+                    nearest.identity, nearest.announced = cmd.name, True
+                self.tts.say(self.p("remembered", lang).format(name=cmd.name), lang, ANSWER)
+                return
+            if cmd.obj is False or self.objects is None:
+                self.tts.say(self.p("no_face", lang), lang, ANSWER)
+                return
+        self._remember_object(cmd.name.lower(), frames, lang)
+
+    def _remember_object(self, name: str, frames: list, lang: str) -> None:
+        """Рамка предмета (YOLOE по названию) → визуальный эмбеддинг → база предметов.
+
+        Предмет держат перед камерой, поэтому из нескольких рамок берём ближайшую
+        к центру кадра. Не нашли ни одной — берём центральную область.
+        """
+        cls = lexicon.find_object(name) or self._to_english(name, lang)
+        used, boxes = [], []
+        for frame in frames:
+            h, w = frame.shape[:2]
+            dets = self.detector.detect(frame, [cls], conf=0.15)
+            if dets:
+                used.append(frame)
+                boxes.append(max(dets, key=lambda d, w=w, h=h: d.conf
+                                 - abs((d.box[0] + d.box[2]) / 2 / w - 0.5)
+                                 - abs((d.box[1] + d.box[3]) / 2 / h - 0.5)).box)
+        unsure = not used
+        if unsure:
+            h, w = frames[0].shape[:2]
+            used, boxes = frames, [(w * 0.3, h * 0.25, w * 0.7, h * 0.85)] * len(frames)
+        emb = self.detector.visual_embedding(used, boxes)
+        self.objects.remember(name, cls, emb, len(used))
+        log.info("Предмет %r (%s) запомнен по %d кадрам%s", name, cls, len(used), ", центр кадра" if unsure else "")
+        self.tts.say(self.p("obj_unsure" if unsure else "remembered_obj", lang).format(name=name), lang, ANSWER)
 
     def _forget(self, cmd: Command) -> None:
         lang = cmd.lang
-        removed = self.faces.forget(cmd.name or None)
+        removed = []
+        # «забудь ключи» — предмет; «забудь всех» без подсказки трогает только людей
+        if self.objects and cmd.obj is not False and (cmd.name or cmd.obj):
+            removed += self.objects.forget(cmd.name or None)
+        if self.faces and cmd.obj is not True and not removed:
+            faces = self.faces.forget(cmd.name or None)
+            for t in self.scene.tracks.values():
+                if t.identity in faces:
+                    t.identity = None
+            removed += faces
         if not removed:
             self.tts.say(self.p("forgot_none", lang), lang, ANSWER)
             return
-        for t in self.scene.tracks.values():
-            if t.identity in removed:
-                t.identity = None
         self.tts.say(self.p("forgot", lang).format(names=", ".join(removed)), lang, ANSWER)
+
+    def _memory(self, cmd: Command) -> None:
+        lang = cmd.lang
+        people = sorted(self.faces.db) if self.faces else []
+        objects = sorted(self.objects.db) if self.objects else []
+        if not people and not objects:
+            self.tts.say(self.p("memory_empty", lang), lang, ANSWER)
+            return
+        none = self.p("none_word", lang)
+        self.tts.say(self.p("memory_list", lang).format(
+            people=", ".join(people) or none, objects=", ".join(objects) or none), lang, ANSWER)
 
     # --- фоновый трекинг -------------------------------------------------
     def _scan_loop(self) -> None:
-        interval = self.cfg["detector"]["scan_interval_s"]
+        """Адаптивная частота: часто, пока сцена меняется или что-то рядом, иначе редко.
+
+        Объект, приближающийся издалека, замечается ещё «далеко» (>4 м) в редком режиме,
+        и первый же кадр с изменением возвращает частый режим.
+        """
+        d = self.cfg["detector"]
+        fast, idle = d["scan_interval_s"], d.get("idle_interval_s", d["scan_interval_s"])
+        hold = d.get("active_hold_s", 3.0)
+        last_change, interval = 0.0, fast
         while self._running:
             started = time.time()
             try:
                 self._scan_once()
+                if self.scene.changed:
+                    last_change = started
             except Exception:
                 log.exception("Ошибка фонового трекинга")
+            new = fast if started - last_change < hold else idle
+            if new != interval:
+                log.debug("Фоновый трекинг: раз в %.1f с", new)
+                interval = new
             time.sleep(max(0.0, interval - (time.time() - started)))
 
     def _scan_once(self) -> None:

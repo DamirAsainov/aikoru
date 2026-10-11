@@ -11,7 +11,7 @@ const PLACEHOLDER = {
 };
 const INTENT = {
   describe: "описание", find: "поиск", who: "кто рядом", remember: "запомнить",
-  forget: "забыть", pause: "пауза", resume: "продолжить", ask: "вопрос", unknown: "?",
+  forget: "забыть", memory: "память", pause: "пауза", resume: "продолжить", ask: "вопрос", unknown: "?",
 };
 
 // ?theme=light|dark — принудительная тема (по умолчанию — как в системе)
@@ -61,6 +61,14 @@ $("#remember-form").onsubmit = (e) => {
   $("#remember-name").value = "";
   setTimeout(refreshState, 2500);
 };
+$("#remember-obj-form").onsubmit = (e) => {
+  e.preventDefault();
+  const name = $("#remember-obj-name").value.trim();
+  if (!name) return;
+  send(lang === "kk" ? `менің ${name} затты есте сақта` : `запомни предмет ${name}`);
+  $("#remember-obj-name").value = "";
+  setTimeout(refreshState, 2500);
+};
 $("#pause").onclick = async () => {
   const paused = $("#pause").getAttribute("aria-pressed") !== "true";
   renderState(await post("/api/pause", { paused }));
@@ -73,25 +81,32 @@ function renderState(s) {
   p.setAttribute("aria-pressed", String(s.paused));
   p.textContent = s.paused ? "Подсказки: пауза" : "Подсказки: вкл";
 
-  const list = $("#faces");
-  if (s.faces === null) {
-    list.innerHTML = '<li class="empty">Распознавание лиц выключено</li>';
-    $("#faces-count").textContent = "—";
+  renderMemory($("#faces"), $("#faces-count"), s.faces, "/api/faces/forget",
+    "Распознавание лиц выключено",
+    "Пока никого. Скажите «Айкору, запомни как …» или введите имя ниже");
+  renderMemory($("#objects"), $("#objects-count"), s.objects, "/api/objects/forget",
+    "Память предметов выключена",
+    "Пока пусто. Поднесите предмет и скажите «Айкору, запомни мои ключи»");
+}
+function renderMemory(list, count, items, forgetUrl, offText, emptyText) {
+  if (items === null || items === undefined) {
+    list.innerHTML = `<li class="empty">${offText}</li>`;
+    count.textContent = "—";
     return;
   }
-  $("#faces-count").textContent = `${s.faces.length} в памяти`;
-  if (!s.faces.length) {
-    list.innerHTML = '<li class="empty">Пока никого. Скажите «Айкору, запомни как …» или введите имя ниже</li>';
+  count.textContent = `${items.length} в памяти`;
+  if (!items.length) {
+    list.innerHTML = `<li class="empty">${emptyText}</li>`;
     return;
   }
-  list.replaceChildren(...s.faces.map((name) => {
+  list.replaceChildren(...items.map((name) => {
     const li = document.createElement("li");
     li.append(name);
     const del = document.createElement("button");
     del.textContent = "×";
     del.title = `Забыть ${name}`;
     del.setAttribute("aria-label", `Забыть ${name}`);
-    del.onclick = async () => { await post("/api/faces/forget", { name }); refreshState(); };
+    del.onclick = async () => { await post(forgetUrl, { name }); refreshState(); };
     li.append(del);
     return li;
   }));

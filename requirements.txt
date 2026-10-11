@@ -1,6 +1,6 @@
 # torch/torchvision/torchaudio ставятся отдельно под вашу CUDA, см. README
 ultralytics>=8.3.150      # YOLOE
-transformers>=4.51,<5    # Moondream2 (remote code) не совместим с transformers 5.x
+transformers>=4.57,<5    # LFM2-VL; 5.x не проверялся с остальными моделями
 accelerate
 sentencepiece
 vosk                      # STT ru + kk, слово активации

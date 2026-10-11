@@ -25,23 +25,35 @@ WHO = {
     "ru": ["кто это", "кто рядом", "кто передо мной", "кто там", "кто здесь", "кого видишь"],
     "kk": ["бұл кім", "кім бар", "кім тұр", "кім көрінеді", "кімді көріп"],
 }
+MEMORY = {
+    "ru": ["что ты помнишь", "что помнишь", "кого ты помнишь", "кого помнишь", "что в памяти"],
+    "kk": ["не есіңде", "кім есіңде", "жадта не бар"],
+}
 ALL_WORDS = {"всех", "всё", "все", "барлығын", "бәрін", "барлық"}
+# Подсказки, кого запоминать: предмет или человека. Без них решает наличие лица в кадре.
+OBJECT_WORDS = {"предмет", "предмета", "вещь", "вещи", "объект", "штуку", "штука",
+                "зат", "затты", "затымды", "нәрсе", "нәрсені"}
+POSSESSIVE = {"мой", "моя", "мою", "мои", "моё", "мое", "свой", "свою", "свои", "менің", "өзімнің"}
+PERSON_WORDS = {"человека", "человек", "лицо", "зовут", "меня", "его", "её", "ее", "друга", "подругу",
+                "он", "она", "адамды", "адам", "бетін", "есімі", "аты"}
 # Слова-связки, которые не являются именем: «запомни этого человека как Айгерим»
 NAME_FILLER = {
     "этого", "эту", "этот", "человека", "человек", "как", "его", "её", "ее", "это", "меня",
     "лицо", "зовут", "имя", "под", "именем", "пожалуйста", "он", "она", "друга", "подругу",
+    *OBJECT_WORDS, *POSSESSIVE,
     "бұл", "мынаны", "мына", "адамды", "адам", "атымен", "есімі", "аты", "деп", "өтінемін", "бетін",
 }
 
 
 @dataclass
 class Command:
-    intent: str  # describe | find | who | remember | forget | pause | resume | ask | unknown
+    intent: str  # describe | find | who | remember | forget | memory | pause | resume | ask | unknown
     lang: str
     text: str
     target_en: str | None = None   # для find: класс из словаря
     target_raw: str = ""           # для find: исходная фраза объекта, если нет в словаре
-    name: str = ""                 # для remember/forget: имя человека
+    name: str = ""                 # для remember/forget: имя человека или предмета
+    obj: bool | None = None        # для remember/forget: True — предмет, False — человек, None — неясно
 
 
 def _has(text: str, keys: list[str]) -> bool:
@@ -59,6 +71,25 @@ def _extract_name(text: str, keys: list[str]) -> str:
     return " ".join(w.capitalize() for w in words[:3])
 
 
+def _object_hint(text: str, name: str) -> bool | None:
+    words = set(re.findall(r"[\w-]+", text))
+    if words & PERSON_WORDS:
+        return False
+    if words & (OBJECT_WORDS | POSSESSIVE) or (name and find_object(name)):
+        return True
+    return None
+
+
+def _memory_command(intent: str, t: str, lang: str, keys: list[str]) -> Command:
+    name = _extract_name(t, keys)
+    obj = _object_hint(t, name)
+    if obj:
+        name = name.lower()  # «ключи», а не «Ключи»: имя предмета звучит внутри фразы
+    if intent == "forget" and name.lower() in ALL_WORDS:
+        name = ""
+    return Command(intent, lang, t, name=name, obj=obj)
+
+
 def parse(text: str, lang: str) -> Command:
     t = text.lower().strip()
     if not t:
@@ -67,11 +98,12 @@ def parse(text: str, lang: str) -> Command:
         return Command("pause", lang, t)
     if _has(t, RESUME[lang]):
         return Command("resume", lang, t)
+    if _has(t, MEMORY[lang]):
+        return Command("memory", lang, t)
     if _has(t, REMEMBER[lang]):
-        return Command("remember", lang, t, name=_extract_name(t, REMEMBER[lang]))
+        return _memory_command("remember", t, lang, REMEMBER[lang])
     if _has(t, FORGET[lang]):
-        name = _extract_name(t, FORGET[lang])
-        return Command("forget", lang, t, name="" if name.lower() in ALL_WORDS else name)
+        return _memory_command("forget", t, lang, FORGET[lang])
     if _has(t, WHO[lang]):
         return Command("who", lang, t)
     target = find_object(t)
@@ -97,7 +129,8 @@ def pick_language(hyps) -> Command:
     for h in hyps:
         cmd = parse(h.text, h.lang)
         score = h.conf
-        if cmd.intent in ("describe", "find", "pause", "resume", "remember", "forget", "who"):
+        if cmd.intent in ("describe", "find", "pause", "resume", "remember", "forget", "who",
+                          "memory"):
             score += 0.5
         if h.lang == "kk" and KK_LETTERS & set(h.text):
             score += 0.2

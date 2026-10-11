@@ -4,10 +4,11 @@
     GET  /frame.jpg        текущий кадр камеры (интерфейс опрашивает его ~10 раз/с)
     GET  /stream.mjpg      видео с камеры (MJPEG, для VLC и т.п.)
     GET  /events           Server-Sent Events: произнесённые фразы, команды, треки
-    GET  /api/state        состояние: язык, пауза, знакомые лица, треки
+    GET  /api/state        состояние: язык, пауза, знакомые лица, предметы, треки
     POST /api/command      {"text": "...", "lang": "ru"|"kk"}
     POST /api/pause        {"paused": true|false}
     POST /api/faces/forget {"name": "..."}
+    POST /api/objects/forget {"name": "..."}
 """
 from __future__ import annotations
 
@@ -101,6 +102,7 @@ class WebUI:
             "paused": self.a.paused,
             "device": self.a.cfg["device"],
             "faces": sorted(self.a.faces.db) if self.a.faces else None,
+            "objects": sorted(self.a.objects.db) if self.a.objects else None,
             "tracks": self.tracks(),
         }
 
@@ -210,4 +212,8 @@ class _Handler(BaseHTTPRequestHandler):
             if not a.faces:
                 return self._json({"error": "faces disabled"}, 400)
             return self._json({"removed": a.faces.forget(str(body.get("name", "")) or None)})
+        if self.path == "/api/objects/forget":
+            if not a.objects:
+                return self._json({"error": "objects disabled"}, 400)
+            return self._json({"removed": a.objects.forget(str(body.get("name", "")) or None)})
         self._json({"error": "not found"}, 404)
