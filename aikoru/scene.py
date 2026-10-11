@@ -19,6 +19,7 @@ class Track:
     first_seen: float
     last_seen: float
     cx: float                       # центр по x, 0..1
+    prev_h: float = 0.0             # высота рамки в прошлом кадре: рост — объект приближается
     hits: int = 1
     announced: bool = False         # пользователю уже сообщили об объекте
     danger_level: str | None = None # последняя объявленная дистанция опасности
@@ -41,19 +42,23 @@ class Scene:
         self.reappear_window_s = reappear_window_s
         self.tracks: dict[int, Track] = {}
         self._recently_lost: list[tuple[float, Track]] = []
+        # в последнем update что-то менялось: новый трек, потеря, объект рядом или приближается
+        self.changed = False
 
     def update(self, dets: list[Detection], now: float, frame_width: int) -> list[Track]:
         """Обновляет треки. Возвращает объекты, окончательно ушедшие из вида
         (потеряны и не вернулись за reappear_window_s)."""
-        fresh = []
+        fresh, approaching = [], False
         for d in dets:
             cx = (d.box[0] + d.box[2]) / 2 / frame_width
             tr = self.tracks.get(d.track_id)
             if tr is None:
                 fresh.append((d, cx))
             else:
+                tr.prev_h = _height(tr)
                 tr.det, tr.last_seen, tr.cx = d, now, cx
                 tr.hits += 1
+                approaching |= _height(tr) > tr.prev_h * 1.15
         for d, cx in fresh:  # новые номера — после обновления известных треков
             tr = Track(d.track_id, d.name, d, now, now, cx)
             self._inherit(tr, now)
@@ -64,6 +69,8 @@ class Scene:
             del self.tracks[t.id]
             if t.confirmed:
                 self._recently_lost.append((now, t))
+        self.changed = bool(fresh or lost or approaching
+                            or any(d.distance != "far" for d in dets))
         gone = [t for ts, t in self._recently_lost if now - ts >= self.reappear_window_s]
         self._recently_lost = [(ts, t) for ts, t in self._recently_lost
                                if now - ts < self.reappear_window_s]

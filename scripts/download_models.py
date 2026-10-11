@@ -57,22 +57,26 @@ def main() -> None:
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(fetch(url))
 
-    # 4. Moondream2 и NLLB (CTranslate2 int8) — в локальные папки models/
-    v = cfg["vlm"]
-    fetch_repo(v["repo"], v["revision"], v["path"], exclude=[".gguf", ".png", ".jpg", ".md"])
-    # код Moondream грузит токенизатор из отдельного репозитория через HF-кэш (models/hf)
-    from huggingface_hub import hf_hub_download
+    # 4. VLM и NLLB (CTranslate2 int8) — в локальные папки models/
+    from aikoru.vlm import ensure_tokenizer_compat
 
-    hf_hub_download("moondream/starmie-v1", "tokenizer.json")
+    v = cfg["vlm"]
+    fetch_repo(v["repo"], v["revision"], v["path"], exclude=[".gguf", ".png", ".jpg", ".md", "onnx/"])
+    ensure_tokenizer_compat(v["path"])
     t = cfg["translator"]
     fetch_repo(t["repo"], "main", t["path"], exclude=[".md"])
 
     # 5. YOLOE + текстовый энкодер MobileCLIP (ultralytics качает сам)
     from aikoru.detector import Detector
 
-    det = Detector(cfg["detector"]["weights"], cfg["device"])
-    det.model.get_text_pe(["door"])
-    log.info("YOLOE готов")
+    # Эмбеддинги всех классов словаря считаются один раз и кэшируются на диске:
+    # во время работы текстовый энкодер (572 МБ) нужен только для новых слов
+    from aikoru.lexicon import OBJECT_STEMS
+
+    det = Detector(cfg["detector"]["weights"], "cpu")
+    names = sorted(set(cfg["detector"]["standard_classes"]) | set(OBJECT_STEMS.values()))
+    det.text.get(det.model, names)
+    log.info("YOLOE готов, текстовых запросов в кэше: %d", len(det.text.vecs))
     log.info("Все модели загружены в %s", models)
 
 

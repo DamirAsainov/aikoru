@@ -10,6 +10,8 @@ import logging
 import math
 import threading
 from dataclasses import dataclass
+from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 
@@ -36,36 +38,139 @@ class Detection:
     track_id: int | None = None
 
 
+class TextEmbeddings:
+    """Дисковый кэш текстовых эмбеддингов YOLOE: слово → вектор.
+
+    Без кэша YOLOE на каждый новый набор классов заново читает с диска
+    текстовый энкодер MobileCLIP (572 МБ, ~0.7 с). Эмбеддинги слов независимы,
+    поэтому энкодер нужен только для слов, которых ещё нет в кэше, и сразу
+    выгружается — в памяти он не остаётся.
+    """
+    _shared: ClassVar[dict[str, TextEmbeddings]] = {}
+    _shared_lock = threading.Lock()
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.vecs: dict[str, np.ndarray] = {}
+        self._lock = threading.Lock()
+        if path.exists():
+            with np.load(path) as z:
+                self.vecs = {k: z[k] for k in z.files}
+
+    @classmethod
+    def for_weights(cls, weights: str) -> TextEmbeddings:
+        """Один кэш на файл весов, общий для всех экземпляров Detector."""
+        stem = Path(weights).stem.removesuffix("-seg")
+        path = Path(weights).resolve().parent / f"{stem}.text_pe.npz"
+        with cls._shared_lock:
+            if str(path) not in cls._shared:
+                cls._shared[str(path)] = cls(path)
+            return cls._shared[str(path)]
+
+    def get(self, model, names: list[str]):
+        import torch
+
+        with self._lock:
+            missing = [n for n in dict.fromkeys(names) if n not in self.vecs]
+            if missing:
+                log.info("Кодирую текстовые запросы YOLOE: %s", ", ".join(missing))
+                pe = model.get_text_pe(missing)[0].float().cpu().numpy()
+                self.vecs.update(zip(missing, pe))
+                tmp = self.path.with_suffix(".tmp.npz")
+                np.savez(tmp, **self.vecs)
+                tmp.replace(self.path)
+            return torch.from_numpy(np.stack([self.vecs[n] for n in names]))[None]
+
+
+def load_yoloe(weights: str):
+    """YOLOE без ветки масок: маски не используются, а детекция так ~20% быстрее.
+
+    Веса -seg.pt подходят целиком (голова детекции та же), Proto просто не строится.
+    """
+    from ultralytics import YOLOE
+
+    if weights.endswith("-seg.pt"):
+        # имя конфигурации без папки: ultralytics ищет yoloe-11s.yaml среди встроенных
+        return YOLOE(Path(weights).name.replace("-seg.pt", ".yaml")).load(weights)
+    return YOLOE(weights)
+
+
 class Detector:
     def __init__(self, weights: str, device: str, conf: float = 0.3,
-                 classes: list[str] | None = None, tracker: str = "bytetrack.yaml"):
-        from ultralytics import YOLOE
-
-        self.model = YOLOE(weights)
+                 classes: list[str] | None = None, tracker: str = "bytetrack.yaml",
+                 imgsz: int = 640):
+        self.model = load_yoloe(weights)
+        self.text = TextEmbeddings.for_weights(weights)
         self.device = device
         self.conf = conf
+        self.imgsz = imgsz
         self._lock = threading.Lock()
         self._pe_cache: dict[tuple[str, ...], object] = {}
         self._current: tuple[str, ...] = ()
+        self._current_pe = None
+        self._vp = None  # предиктор визуальных промптов, создаётся при первом запоминании
         self.tracker = tracker
         if classes:
             self._set_classes(classes)
 
-    def _set_classes(self, names: list[str]) -> None:
+    def _set_classes(self, names: list[str], pe=None) -> None:
+        """pe — готовые эмбеддинги (например, визуальные); без них берутся текстовые."""
         key = tuple(names)
-        if key == self._current:
+        if pe is None:
+            if key not in self._pe_cache:
+                self._pe_cache[key] = self.text.get(self.model, list(key))
+            pe = self._pe_cache[key]
+        if key == self._current and pe is self._current_pe:
             return
-        if key not in self._pe_cache:
-            self._pe_cache[key] = self.model.get_text_pe(list(key))
-        self.model.set_classes(list(key), self._pe_cache[key])
-        self.model.predictor = None  # иначе predictor продолжает работать со старыми классами
-        self._current = key
+        self.model.model.set_classes(list(key), pe)
+        if not self._swap_predictor_classes(list(key), pe):
+            self.model.predictor = None  # иначе predictor продолжает работать со старыми классами
+        self._current, self._current_pe = key, pe
 
-    def detect(self, frame: np.ndarray, names: list[str], conf: float | None = None) -> list[Detection]:
+    def _swap_predictor_classes(self, names: list[str], pe) -> bool:
+        """Меняет классы прямо в копии модели внутри predictor.
+
+        Пересоздание predictor (deepcopy + fuse) стоит ~0.3 с на каждую смену
+        запроса, подмена эмбеддингов — миллисекунды.
+        """
+        try:
+            backend = self.model.predictor.model.backend
+            device = next(backend.model.parameters()).device
+            backend.model.set_classes(names, pe.to(device))
+            backend.names = dict(enumerate(names))
+            return True
+        except AttributeError:  # predictor ещё не создан или другой бэкенд
+            return False
+
+    def visual_embedding(self, frames: list[np.ndarray], boxes: list[tuple]) -> np.ndarray:
+        """Визуальный промпт YOLOE: рамки объекта на кадрах → один нормированный эмбеддинг.
+
+        Считается только backbone + SAVPE (без головы детекции), ~20 мс на кадр.
+        """
+        import torch
+
         with self._lock:
-            self._set_classes(names)
+            if self._vp is None:
+                from ultralytics.models.yolo.yoloe import YOLOEVPDetectPredictor
+
+                self._vp = YOLOEVPDetectPredictor(overrides={
+                    "task": "detect", "mode": "predict", "save": False, "verbose": False,
+                    "batch": 1, "device": self.device, "imgsz": self.imgsz,
+                })
+                self._vp.setup_model(self.model.model, verbose=False)
+            embs = []
+            for frame, box in zip(frames, boxes):
+                self._vp.set_prompts({"bboxes": np.array([box], dtype=np.float32), "cls": np.array([0])})
+                embs.append(self._vp.get_vpe(frame)[0, 0].float())
+            emb = torch.nn.functional.normalize(torch.stack(embs).mean(0), dim=0)
+        return emb.cpu().numpy()
+
+    def detect(self, frame: np.ndarray, names: list[str], conf: float | None = None,
+               pe=None) -> list[Detection]:
+        with self._lock:
+            self._set_classes(names, pe)
             res = self.model.predict(
-                frame, conf=conf or self.conf, device=self.device, verbose=False
+                frame, conf=conf or self.conf, device=self.device, imgsz=self.imgsz, verbose=False
             )[0]
         return self._parse(res, list(names), frame.shape)
 
@@ -78,7 +183,7 @@ class Detector:
         with self._lock:
             res = self.model.track(
                 frame, persist=True, tracker=self.tracker, conf=conf,
-                device=self.device, verbose=False,
+                device=self.device, imgsz=self.imgsz, verbose=False,
             )[0]
         dets = self._parse(res, list(self._current), frame.shape)
         return [d for d in dets if d.track_id is not None]

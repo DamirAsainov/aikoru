@@ -69,6 +69,19 @@
       </form>
       <p class="hint">Человек должен смотреть в камеру. Данные лиц хранятся только на этом устройстве.</p>
     </section>
+
+    <section class="card objects-card" aria-label="Мои предметы">
+      <div class="card-head">
+        <h2>Мои предметы</h2>
+        <span class="mono muted" id="objects-count">—</span>
+      </div>
+      <ul class="faces" id="objects"></ul>
+      <form id="remember-obj-form" class="row">
+        <input id="remember-obj-name" type="text" autocomplete="off" placeholder="Предмет в центре кадра">
+        <button class="btn" type="submit">Запомнить</button>
+      </form>
+      <p class="hint">Поднесите предмет к камере. Потом скажите «найди мои ключи» — поиск идёт по образцу, а не по названию.</p>
+    </section>
   </main>
 
   <script src="app.js"></script>

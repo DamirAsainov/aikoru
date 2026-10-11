@@ -4,7 +4,7 @@
     python scripts/selftest.py tts stt    # выборочно
 
 TTS синтезирует фразы → Vosk распознаёт их обратно (проверка STT и слова
-активации), YOLOE и Moondream проверяются на кадре с камеры или на тестовом
+активации), YOLOE и VLM проверяются на кадре с камеры или на тестовом
 изображении ultralytics.
 """
 from __future__ import annotations
@@ -57,7 +57,7 @@ def main() -> None:
     cfg = load_config()
     prepare_env(cfg["models_dir"], offline=True)
     only = {a for a in sys.argv[1:] if not a.startswith("--")} or {
-        "tts", "stt", "commands", "yoloe", "track", "faces", "nllb", "vlm"}
+        "tts", "stt", "commands", "yoloe", "track", "faces", "objects", "nllb", "vlm"}
     dev = cfg["device"]
     log.info("Устройство: %s", dev)
 
@@ -107,9 +107,11 @@ def main() -> None:
         for lang, text in [("ru", "что вокруг"), ("ru", "найди скамейку"), ("ru", "где светофор"),
                            ("ru", "что написано на вывеске"), ("ru", "стоп"),
                            ("kk", "айналада не бар"), ("kk", "есікті тап"), ("kk", "бағдаршам қайда"),
-                           ("ru", "найди красный зонт")]:
+                           ("ru", "найди красный зонт"), ("ru", "запомни мои ключи"),
+                           ("ru", "где мои ключи"), ("kk", "менің кілтімді есте сақта"), ("ru", "что ты помнишь")]:
             c = parse(text, lang)
-            log.info("parse %-28r → %s target=%s raw=%r", text, c.intent, c.target_en, c.target_raw)
+            log.info("parse %-28r → %s target=%s raw=%r name=%r obj=%s",
+                     text, c.intent, c.target_en, c.target_raw, c.name, c.obj)
 
     frame = None
     if only & {"yoloe", "vlm", "faces", "track"}:
@@ -119,7 +121,7 @@ def main() -> None:
         from aikoru.detector import Detector
 
         d = cfg["detector"]
-        det = Detector(d["weights"], dev, d["conf"])
+        det = Detector(d["weights"], dev, d["conf"], imgsz=d.get("imgsz", 640))
         for names in (d["standard_classes"], ["door"], ["person"]):
             t0 = time.time()
             dets = det.detect(frame, names)
@@ -132,7 +134,7 @@ def main() -> None:
         from aikoru.scene import Scene
 
         d = cfg["detector"]
-        trk = Detector(d["weights"], dev, d["conf"], d["standard_classes"], d["tracker"])
+        trk = Detector(d["weights"], dev, d["conf"], d["standard_classes"], d["tracker"], d.get("imgsz", 640))
         scene = Scene()
         cam = Camera(cfg["camera"]["index"])
         time.sleep(2)
@@ -155,11 +157,32 @@ def main() -> None:
         log.info("Лица: сохранено образцов %d; узнаю: %s", n, fb.identify(frame))
         fb.forget(None)
 
+    if "objects" in only:
+        # Детерминированно, без камеры: образец — автобус на bus.jpg, поиск на bus.jpg и zidane.jpg
+        import cv2
+        from ultralytics.utils import ASSETS
+
+        from aikoru.detector import Detector
+        from aikoru.objects import ObjectBook
+
+        bus, zid = cv2.imread(str(ASSETS / "bus.jpg")), cv2.imread(str(ASSETS / "zidane.jpg"))
+        det = Detector(cfg["detector"]["weights"], dev, cfg["detector"]["conf"], imgsz=cfg["detector"].get("imgsz", 640))
+        ob = ObjectBook(str(Path(cfg["models_dir"]) / "selftest_objects.json"))
+        box = det.detect(bus, ["bus"])[0].box
+        ob.remember("автобус", "bus", det.visual_embedding([bus], [box]), 1)
+        name = ob.match("где мой автобус")
+        for label, img in (("bus.jpg", bus), ("zidane.jpg", zid)):
+            t0 = time.time()
+            dets = det.detect(img, [ob.db[name]["cls"]], conf=cfg["objects"]["conf"], pe=ob.pe(name))
+            log.info("Предмет %r на %s → %s (%.3f с)", name, label,
+                     [(x.direction, round(x.conf, 2)) for x in dets], time.time() - t0)
+        ob.forget(None)
+
     tr = None
     if "nllb" in only or "vlm" in only:
         from aikoru.translator import Translator
 
-        tr = Translator(cfg["translator"]["path"], dev)
+        tr = Translator(cfg["translator"]["path"], cfg["translator"]["device"])
         for text, src, tgt in [("A man is crossing the street near a bus.", "en", "ru"),
                                ("A man is crossing the street near a bus.", "en", "kk"),
                                ("красный зонт", "ru", "en"), ("қызыл қолшатыр", "kk", "en")]:
@@ -170,10 +193,16 @@ def main() -> None:
         from aikoru.vlm import SceneDescriber
 
         v = cfg["vlm"]
-        vlm = SceneDescriber(v["path"], dev, v["caption_length"])
+        t0 = time.time()
+        vlm = SceneDescriber(v["path"], v["device"], v["image_tokens"], v["max_new_tokens"])
+        log.info("VLM %s загружена на %s за %.1f с", v["path"], v["device"], time.time() - t0)
+        vlm.describe(frame)  # прогрев
         t0 = time.time()
         cap = vlm.describe(frame)
-        log.info("Moondream (%.2f с): %s", time.time() - t0, cap)
+        log.info("VLM описание (%.2f с): %s", time.time() - t0, cap)
+        t0 = time.time()
+        ans = vlm.ask(frame, "How many people are there?")
+        log.info("VLM вопрос (%.2f с): %s", time.time() - t0, ans)
         log.info("→ ru: %s", tr.translate(cap, "en", "ru"))
         log.info("→ kk: %s", tr.translate(cap, "en", "kk"))
 

@@ -14,7 +14,7 @@ def fetch_repo(repo: str, rev: str, dest: str | Path, exclude: list[str] = ()) -
         files = [f for f in json.load(r) if f["type"] == "file"]
     for f in files:
         path = f["path"]
-        if any(path.endswith(e) for e in exclude):
+        if any(path.endswith(e) or e.endswith("/") and path.startswith(e) for e in exclude):  # "onnx/" — папка
             continue
         out = dest / path
         if out.exists() and out.stat().st_size == f["size"]:

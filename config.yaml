@@ -1,6 +1,6 @@
 # AIKORU — конфигурация прототипа
 
-device: auto            # auto | cuda | cpu
+device: auto            # YOLOE и трекинг: auto | cuda | cpu
 models_dir: models
 default_language: ru    # ru | kk — язык фоновых предупреждений до первой команды
 
@@ -15,9 +15,12 @@ camera:
   height: 480
 
 detector:
-  weights: yoloe-11s-seg.pt     # скачивается ultralytics автоматически
+  weights: yoloe-11s-seg.pt     # скачивается ultralytics автоматически (маски не считаются)
+  imgsz: 512                    # 640 — точнее вдали; 512 — на ~35% быстрее; 416 и меньше теряет крупные планы
   conf: 0.30
-  scan_interval_s: 0.3          # фоновый трекинг: ~3 кадра/с (0 — максимально часто)
+  scan_interval_s: 0.3          # фоновый трекинг, когда сцена меняется или что-то ближе ~4 м
+  idle_interval_s: 1.0          # спокойная сцена: только далёкие объекты, ничего нового
+  active_hold_s: 3.0            # сколько секунд после последнего изменения держать частый режим
   tracker: bytetrack.yaml       # bytetrack.yaml | botsort.yaml (ultralytics)
   # Голос звучит только при изменениях: новый объект ближе ~4 м, новый/знакомый
   # человек, знакомый ушёл, опасность прямо по курсу.
@@ -50,15 +53,27 @@ faces:
   unknown_after_s: 2.0          # через сколько секунд объявлять «незнакомый человек»
   remember_samples: 3           # сколько кадров брать при «запомни»
 
+objects:
+  enabled: true
+  db: data/objects.json         # личные предметы: визуальные эмбеддинги YOLOE (не в git)
+  conf: 0.25                    # порог поиска по образцу
+  remember_samples: 3           # сколько кадров брать при «запомни мои ключи»
+
 vlm:
-  repo: vikhyatk/moondream2
-  revision: "2025-06-21"
-  path: moondream2               # локальная папка внутри models/
-  caption_length: short          # short | normal
+  # LFM2.5-VL-450M: ~0.9 ГБ, на CPU 1.5–3 с на ответ. Легче и хуже:
+  # HuggingFaceTB/SmolVLM-256M-Instruct (path: smolvlm-256m), ~1 с, чаще ошибается
+  repo: LiquidAI/LFM2.5-VL-450M
+  revision: main
+  path: lfm2.5-vl-450m           # локальная папка внутри models/
+  device: auto                   # auto: GPU только при min_vram_gb, иначе CPU (fp32)
+  min_vram_gb: 4
+  image_tokens: 64               # 64 — быстро; 128–256 — больше деталей и мелкого текста
+  max_new_tokens: 40
 
 translator:
   repo: JustFrederik/nllb-200-distilled-600M-ct2-int8   # NLLB-200 600M, CTranslate2 int8
   path: nllb-200-600M-ct2-int8
+  device: cpu                    # int8 на CPU: 0.1–0.3 с на фразу, VRAM остаётся для YOLOE
 
 voice:
   wake_words: ["айкору", "ай кору", "айкөру", "ай көру", "айгуру", "икору"]
