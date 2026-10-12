@@ -31,30 +31,35 @@ class Hypothesis:
     conf: float
 
 
+# Vosk слышит «Айкору» то русской моделью («а и кору»), то казахской («әй көру»):
+# сводим казахские буквы и «й» к общему написанию, чтобы сравнивать звучание, а не орфографию
+_FOLD = str.maketrans("әөүұқғіңһйё", "аоуукгинхие")
+
+
 def _normalize(s: str) -> str:
-    return s.lower().replace("ё", "е").replace(" ", "")
+    return s.lower().translate(_FOLD).replace(" ", "")
+
+
+def _similarity(words: list[str], wake_words: list[str]) -> float:
+    cand = _normalize("".join(words))
+    return max(SequenceMatcher(None, cand, _normalize(t)).ratio() for t in wake_words)
 
 
 def wake_score(text: str, wake_words: list[str]) -> float:
     """Лучшее нечёткое совпадение окон из 1–3 слов с одним из вариантов слова активации."""
     words = text.lower().split()
-    targets = [_normalize(w) for w in wake_words]
-    best = 0.0
-    for i in range(len(words)):
-        for n in (1, 2, 3):
-            if i + n > len(words):
-                break
-            cand = _normalize("".join(words[i:i + n]))
-            for t in targets:
-                best = max(best, SequenceMatcher(None, cand, t).ratio())
-    return best
+    return max((_similarity(words[i:i + n], wake_words)
+                for i in range(len(words)) for n in (1, 2, 3) if i + n <= len(words)), default=0.0)
 
 
 def strip_wake(text: str, wake_words: list[str], threshold: float) -> str:
-    """Убирает из начала команды хвост слова активации."""
+    """Убирает из начала команды слово активации или его хвост («ай кору найди» → «найди»)."""
     words = text.split()
-    while words and wake_score(words[0], wake_words) >= threshold - 0.1:
-        words.pop(0)
+    while words:
+        score, n = max((_similarity(words[:n], wake_words), n) for n in (1, 2, 3) if n <= len(words))
+        if score < threshold - 0.1:
+            break
+        del words[:n]
     return " ".join(words)
 
 
@@ -145,6 +150,9 @@ class VoiceInput:
                     for lang, rec in wake_recs.items():
                         if rec.AcceptWaveform(chunk):
                             text = json.loads(rec.Result()).get("text", "")
+                            if text:  # с -v видно, что Vosk слышит вместо слова активации
+                                log.debug("Услышано (%s): %r, похожесть %.2f", lang, text,
+                                          wake_score(text, self.wake_words))
                         else:
                             text = json.loads(rec.PartialResult()).get("partial", "")
                         if text and wake_score(text, self.wake_words) >= self.wake_threshold:
