@@ -129,7 +129,8 @@ button, input { font: inherit; color: inherit; }
 .feed {
   list-style: none; margin: 0; padding: 0;
   display: flex; flex-direction: column; gap: 8px;
-  flex: 1; min-height: 160px; overflow-y: auto;
+  flex: 1; min-height: 160px; max-height: min(60vh, 480px); overflow-y: auto;
+  overscroll-behavior: contain;  /* строка grid с fr по высоте растёт от содержимого — без лимита эфир не скроллится */
 }
 .feed li {
   display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; align-items: baseline;
