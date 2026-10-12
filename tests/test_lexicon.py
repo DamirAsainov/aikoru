@@ -4,6 +4,7 @@ from aikoru.lexicon import (
     OBJECT_NAMES,
     OBJECT_STEMS,
     PHRASES,
+    count_phrase,
     distance_phrase,
     find_object,
     number_words,
@@ -77,3 +78,21 @@ def test_distance_phrase():
 def test_sentence_capitalizes_first_letter_only():
     assert sentence("дверь слева") == "Дверь слева"
     assert sentence("") == ""
+
+
+@pytest.mark.parametrize("n,en,expected", [
+    (1, "person", "один человек"),
+    (3, "person", "три человека"),
+    (5, "chair", "пять стульев"),
+    (12, "chair", "двенадцать стульев"),
+    (2, "door", "две двери"),
+    (21, "door", "двадцать одна дверь"),
+    (1, "window", "одно окно"),
+])
+def test_count_phrase_ru(n, en, expected):
+    assert count_phrase(n, en, "ru") == expected
+
+
+def test_count_phrase_kk_and_unknown():
+    assert count_phrase(3, "person", "kk") == "үш адам"
+    assert count_phrase(2, None, "ru", "зонтиков") == "зонтиков: два"

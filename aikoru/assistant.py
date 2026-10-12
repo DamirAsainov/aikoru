@@ -6,6 +6,7 @@ import queue
 import re
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 
 import cv2
@@ -215,6 +216,8 @@ class Assistant:
             self.tts.say(self.translator.translate(caption, "en", lang), lang, ANSWER)
         elif cmd.intent == "find":
             self._find(cmd)
+        elif cmd.intent == "count":
+            self._count(cmd)
         elif cmd.intent == "who" and self.faces is None                 or cmd.intent in ("remember", "forget", "memory") and self.faces is None and self.objects is None:
             self.tts.say(self.p("faces_off", lang), lang, ANSWER)
         elif cmd.intent in ("who", "remember", "forget", "memory"):
@@ -257,6 +260,36 @@ class Assistant:
             obj=spoken.capitalize(), dir=self.p(d.direction, lang),
             dist=lexicon.distance_phrase(d.distance, d.meters, lang),
         ), lang, ANSWER)
+
+    def _count(self, cmd: Command) -> None:
+        """«Сколько людей в комнате»: свежая детекция по одному классу.
+
+        Без объекта («сколько всего предметов») считаются стандартные классы трекера.
+        """
+        lang = cmd.lang
+        frame = self.camera.read()
+        if cmd.target_en or cmd.target_raw:
+            target_en = cmd.target_en or self._to_english(cmd.target_raw, lang)
+            dets = self.detector.detect(frame, [target_en])
+            self._last_dets = dets
+            log.info("Подсчёт: %r → %r: %d", cmd.target_raw, target_en, len(dets))
+            if not dets:
+                obj = lexicon.object_name(target_en, lang) if cmd.target_en else cmd.target_raw
+                self.tts.say(self.p("not_found", lang).format(
+                    obj=obj if lang == "ru" else obj.capitalize()), lang, ANSWER)
+                return
+            items = lexicon.count_phrase(len(dets), cmd.target_en, lang, cmd.target_raw)
+            self.tts.say(self.p("count", lang).format(items=items), lang, ANSWER)
+            return
+        dets = self.detector.detect(frame, self.cfg["detector"]["standard_classes"])
+        self._last_dets = dets
+        counts = Counter(d.name for d in dets)
+        log.info("Подсчёт всего: %s", dict(counts))
+        if not counts:
+            self.tts.say(self.p("count_none", lang), lang, ANSWER)
+            return
+        items = ", ".join(lexicon.count_phrase(n, en, lang) for en, n in counts.most_common())
+        self.tts.say(self.p("count_all", lang).format(items=items), lang, ANSWER)
 
     # --- лица -----------------------------------------------------------
     def _who(self, cmd: Command) -> None:

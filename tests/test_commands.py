@@ -92,3 +92,29 @@ def test_pick_language_prefers_recognized_command():
 
 def test_pick_language_empty():
     assert pick_language([]).intent == "unknown"
+
+
+@pytest.mark.parametrize("text,lang,target", [
+    ("сколько людей в комнате", "ru", "person"),
+    ("сколько здесь стульев", "ru", "chair"),
+    ("посчитай столы", "ru", "table"),
+    ("бөлмеде қанша адам бар", "kk", "person"),
+    ("неше орындық бар", "kk", "chair"),
+])
+def test_parse_count_known_object(text, lang, target):
+    cmd = parse(text, lang)
+    assert cmd.intent == "count"
+    assert cmd.target_en == target
+
+
+def test_parse_count_unknown_object_keeps_raw_phrase():
+    cmd = parse("сколько зонтиков вокруг", "ru")
+    assert cmd.intent == "count"
+    assert cmd.target_en is None
+    assert cmd.target_raw == "зонтиков"
+
+
+def test_parse_count_everything():
+    cmd = parse("сколько всего предметов в комнате", "ru")
+    assert cmd.intent == "count"
+    assert cmd.target_en is None and cmd.target_raw == ""

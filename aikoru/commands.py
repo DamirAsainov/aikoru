@@ -29,6 +29,17 @@ MEMORY = {
     "ru": ["что ты помнишь", "что помнишь", "кого ты помнишь", "кого помнишь", "что в памяти"],
     "kk": ["не есіңде", "кім есіңде", "жадта не бар"],
 }
+COUNT = {
+    "ru": ["сколько", "посчитай", "подсчитай", "пересчитай", "количество"],
+    "kk": ["қанша", "неше", "сана"],
+}
+# Слова вокруг объекта подсчёта: «сколько всего предметов в комнате» → считать всё
+COUNT_FILLER = {
+    "в", "во", "на", "комнате", "здесь", "тут", "там", "вокруг", "передо", "мной", "рядом",
+    "кадре", "всего", "есть", "видишь", "ты", "видно", "вижу", "предметов", "объектов", "вещей",
+    "бөлмеде", "мұнда", "осында", "айналада", "бар", "көріп", "тұрсың", "көрінеді", "кадрда",
+    "барлығы", "барлық", "зат", "заттар", "нәрсе",
+}
 ALL_WORDS = {"всех", "всё", "все", "барлығын", "бәрін", "барлық"}
 # Подсказки, кого запоминать: предмет или человека. Без них решает наличие лица в кадре.
 OBJECT_WORDS = {"предмет", "предмета", "вещь", "вещи", "объект", "штуку", "штука",
@@ -47,11 +58,11 @@ NAME_FILLER = {
 
 @dataclass
 class Command:
-    intent: str  # describe | find | who | remember | forget | memory | pause | resume | ask | unknown
+    intent: str  # describe | find | count | who | remember | forget | memory | pause | resume | ask | unknown
     lang: str
     text: str
-    target_en: str | None = None   # для find: класс из словаря
-    target_raw: str = ""           # для find: исходная фраза объекта, если нет в словаре
+    target_en: str | None = None   # для find/count: класс из словаря
+    target_raw: str = ""           # для find/count: исходная фраза объекта, если нет в словаре
     name: str = ""                 # для remember/forget: имя человека или предмета
     obj: bool | None = None        # для remember/forget: True — предмет, False — человек, None — неясно
 
@@ -90,6 +101,14 @@ def _memory_command(intent: str, t: str, lang: str, keys: list[str]) -> Command:
     return Command(intent, lang, t, name=name, obj=obj)
 
 
+def _count_command(t: str, lang: str) -> Command:
+    """«Сколько людей в комнате» → count person; «сколько всего предметов» → count всего (без цели)."""
+    target = find_object(t)
+    words = re.findall(r"[\w-]+", _strip_keys(t, COUNT[lang]))
+    raw = " ".join(w for w in words if w not in COUNT_FILLER)
+    return Command("count", lang, t, target, raw)
+
+
 def parse(text: str, lang: str) -> Command:
     t = text.lower().strip()
     if not t:
@@ -104,6 +123,8 @@ def parse(text: str, lang: str) -> Command:
         return _memory_command("remember", t, lang, REMEMBER[lang])
     if _has(t, FORGET[lang]):
         return _memory_command("forget", t, lang, FORGET[lang])
+    if _has(t, COUNT[lang]):
+        return _count_command(t, lang)
     if _has(t, WHO[lang]):
         return Command("who", lang, t)
     target = find_object(t)
@@ -130,7 +151,7 @@ def pick_language(hyps) -> Command:
         cmd = parse(h.text, h.lang)
         score = h.conf
         if cmd.intent in ("describe", "find", "pause", "resume", "remember", "forget", "who",
-                          "memory"):
+                          "memory", "count"):
             score += 0.5
         if h.lang == "kk" and KK_LETTERS & set(h.text):
             score += 0.2
