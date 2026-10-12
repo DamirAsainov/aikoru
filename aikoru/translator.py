@@ -1,6 +1,6 @@
 """Офлайн-перевод NLLB-200 (CTranslate2 int8) между en, ru и kk.
 
-Moondream и текстовые запросы YOLOE работают только на английском.
+Языковые модели и текстовые запросы YOLOE работают только на английском.
 """
 from __future__ import annotations
 

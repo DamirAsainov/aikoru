@@ -51,14 +51,16 @@ faces:
   remember_samples: 3           # сколько кадров брать при «запомни»
 
 vlm:
-  repo: vikhyatk/moondream2
-  revision: "2025-06-21"
-  path: moondream2               # локальная папка внутри models/
+  repo: HuggingFaceTB/SmolVLM-500M-Instruct
+  revision: main
+  path: smolvlm-500m             # локальная папка внутри models/
   caption_length: short          # short | normal
+  device: cuda                   # ~1 ГБ в fp16, влезает в 2 ГБ видеопамяти; cpu — если GPU нет
 
 translator:
   repo: JustFrederik/nllb-200-distilled-600M-ct2-int8   # NLLB-200 600M, CTranslate2 int8
   path: nllb-200-600M-ct2-int8
+  device: cpu                    # на GPU нужны библиотеки CUDA для ctranslate2
 
 voice:
   wake_words: ["айкору", "ай кору", "айкөру", "ай көру", "айгуру", "икору"]

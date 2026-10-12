@@ -1,4 +1,4 @@
-"""Оркестратор AIKORU: камера + YOLOE + Moondream + перевод + голос."""
+"""Оркестратор AIKORU: камера + YOLOE + SmolVLM + перевод + голос."""
 from __future__ import annotations
 
 import logging
@@ -50,11 +50,11 @@ class Assistant:
             except FileNotFoundError as e:
                 log.warning("Распознавание лиц отключено: %s", e)
         log.info("Загрузка переводчика (NLLB)…")
-        self.translator = Translator(cfg["translator"]["path"], dev)
-        log.info("Загрузка VLM (Moondream)…")
+        self.translator = Translator(cfg["translator"]["path"], cfg["translator"].get("device", "cpu"))
+        log.info("Загрузка VLM (SmolVLM)…")
         v = cfg["vlm"]
-        self.vlm = SceneDescriber(v["path"], dev, v["caption_length"])
-        log.info("Прогрев моделей…")  # первый вызов Moondream/YOLOE в разы медленнее
+        self.vlm = SceneDescriber(v["path"], v.get("device", "cpu"), v["caption_length"])
+        log.info("Прогрев моделей…")  # первый вызов VLM/YOLOE в разы медленнее
         import numpy as np
 
         blank = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -199,7 +199,7 @@ class Assistant:
         elif cmd.intent == "describe":
             self.tts.say(self.p("looking"), lang, ANSWER)
             caption = self.vlm.describe(self.camera.read())
-            log.info("Moondream: %s", caption)
+            log.info("VLM: %s", caption)
             self.tts.say(self.translator.translate(caption, "en", lang), lang, ANSWER)
         elif cmd.intent == "find":
             self._find(cmd)

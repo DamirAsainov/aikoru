@@ -12,3 +12,4 @@ opencv-python
 pyyaml
 pillow
 numpy
+ctranslate2

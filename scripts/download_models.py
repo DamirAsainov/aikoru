@@ -57,13 +57,9 @@ def main() -> None:
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(fetch(url))
 
-    # 4. Moondream2 и NLLB (CTranslate2 int8) — в локальные папки models/
+    # 4. SmolVLM-500M и NLLB (CTranslate2 int8) — в локальные папки models/
     v = cfg["vlm"]
-    fetch_repo(v["repo"], v["revision"], v["path"], exclude=[".gguf", ".png", ".jpg", ".md"])
-    # код Moondream грузит токенизатор из отдельного репозитория через HF-кэш (models/hf)
-    from huggingface_hub import hf_hub_download
-
-    hf_hub_download("moondream/starmie-v1", "tokenizer.json")
+    fetch_repo(v["repo"], v["revision"], v["path"], exclude=[".onnx", ".md", ".png", ".jpg"])
     t = cfg["translator"]
     fetch_repo(t["repo"], "main", t["path"], exclude=[".md"])
 

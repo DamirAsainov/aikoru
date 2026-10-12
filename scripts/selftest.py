@@ -4,7 +4,7 @@
     python scripts/selftest.py tts stt    # выборочно
 
 TTS синтезирует фразы → Vosk распознаёт их обратно (проверка STT и слова
-активации), YOLOE и Moondream проверяются на кадре с камеры или на тестовом
+активации), YOLOE и SmolVLM проверяются на кадре с камеры или на тестовом
 изображении ultralytics.
 """
 from __future__ import annotations
@@ -159,7 +159,7 @@ def main() -> None:
     if "nllb" in only or "vlm" in only:
         from aikoru.translator import Translator
 
-        tr = Translator(cfg["translator"]["path"], dev)
+        tr = Translator(cfg["translator"]["path"], cfg["translator"].get("device", "cpu"))
         for text, src, tgt in [("A man is crossing the street near a bus.", "en", "ru"),
                                ("A man is crossing the street near a bus.", "en", "kk"),
                                ("красный зонт", "ru", "en"), ("қызыл қолшатыр", "kk", "en")]:
@@ -170,10 +170,10 @@ def main() -> None:
         from aikoru.vlm import SceneDescriber
 
         v = cfg["vlm"]
-        vlm = SceneDescriber(v["path"], dev, v["caption_length"])
+        vlm = SceneDescriber(v["path"], v.get("device", "cpu"), v["caption_length"])
         t0 = time.time()
         cap = vlm.describe(frame)
-        log.info("Moondream (%.2f с): %s", time.time() - t0, cap)
+        log.info("SmolVLM (%.2f с): %s", time.time() - t0, cap)
         log.info("→ ru: %s", tr.translate(cap, "en", "ru"))
         log.info("→ kk: %s", tr.translate(cap, "en", "kk"))
 
