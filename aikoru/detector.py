@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import threading
@@ -95,12 +96,39 @@ def load_yoloe(weights: str):
     return YOLOE(weights)
 
 
+def openvino_available() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("openvino") is not None
+
+
+def export_openvino(weights: str, classes: list[str], imgsz: tuple[int, int]) -> str:
+    """YOLOE с зашитыми классами → модель OpenVINO (FP32, статичный вход h×w).
+
+    Текстовые эмбеддинги впекаются в голову детекции, поэтому классы после
+    экспорта не меняются: подходит только для трекера с постоянным набором.
+    Экспорт делается один раз (~1 мин) и кладётся рядом с весами.
+    """
+    key = hashlib.sha1("|".join(classes).encode()).hexdigest()[:8]
+    stem = Path(weights).stem.removesuffix("-seg")
+    out = Path(weights).resolve().parent / f"{stem}-{key}-{imgsz[0]}x{imgsz[1]}_openvino_model"
+    if (out / "metadata.yaml").exists():
+        return str(out)
+    log.info("Экспорт трекера в OpenVINO (%dx%d), один раз…", *imgsz)
+    model = load_yoloe(weights)
+    model.set_classes(list(classes), TextEmbeddings.for_weights(weights).get(model, list(classes)))
+    tmp = Path(model.export(format="openvino", imgsz=list(imgsz), half=False, dynamic=False))
+    tmp.replace(out)
+    return str(out)
+
+
 class Detector:
     def __init__(self, weights: str, device: str, conf: float = 0.3,
                  classes: list[str] | None = None, tracker: str = "bytetrack.yaml",
-                 imgsz: int = 640):
-        self.model = load_yoloe(weights)
-        self.text = TextEmbeddings.for_weights(weights)
+                 imgsz: int | tuple[int, int] = 640, backend: str = "torch"):
+        """backend="openvino" — только для трекера: классы фиксируются при экспорте,
+        detect() с другими классами и visual_embedding() недоступны."""
+        self.backend = backend
         self.device = device
         self.conf = conf
         self.imgsz = imgsz
@@ -110,12 +138,27 @@ class Detector:
         self._current_pe = None
         self._vp = None  # предиктор визуальных промптов, создаётся при первом запоминании
         self.tracker = tracker
+        if backend == "openvino":
+            from ultralytics import YOLO
+
+            if not classes:
+                raise ValueError("OpenVINO-детектору нужен постоянный набор классов")
+            size = imgsz if isinstance(imgsz, tuple) else (imgsz, imgsz)
+            self.model = YOLO(export_openvino(weights, classes, size), task="detect")
+            self._current = tuple(classes)
+            return
+        self.model = load_yoloe(weights)
+        self.text = TextEmbeddings.for_weights(weights)
         if classes:
             self._set_classes(classes)
 
     def _set_classes(self, names: list[str], pe=None) -> None:
         """pe — готовые эмбеддинги (например, визуальные); без них берутся текстовые."""
         key = tuple(names)
+        if self.backend == "openvino":
+            if key != self._current or pe is not None:
+                raise ValueError("Классы OpenVINO-модели зафиксированы при экспорте")
+            return
         if pe is None:
             if key not in self._pe_cache:
                 self._pe_cache[key] = self.text.get(self.model, list(key))

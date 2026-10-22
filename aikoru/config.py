@@ -14,6 +14,7 @@ def load_config(path: str | Path | None = None) -> dict:
     with open(path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     cfg["models_dir"] = str((ROOT / cfg.get("models_dir", "models")).resolve())
+    prepare_openmp(cfg)  # до первого импорта torch
     cfg["device"] = resolve_device(cfg.get("device", "auto"))
     for section in ("faces", "objects"):
         if section in cfg:
@@ -24,6 +25,32 @@ def load_config(path: str | Path | None = None) -> dict:
         cfg[section]["device"] = resolve_device(cfg[section].get("device", "auto"),
                                                 cfg[section].get("min_vram_gb", 0))
     return cfg
+
+
+def prepare_openmp(cfg: dict) -> None:
+    """Включает OMP_WAIT_POLICY=PASSIVE, если трекер пойдёт на CPU через OpenVINO.
+
+    Иначе потоки OpenMP у torch после каждой операции крутятся в ожидании и
+    отнимают ядра у OpenVINO: на i5-10400 трекер 150 мс вместо 50 мс. Цена —
+    NLLB на ~0.13 с медленнее на фразу, поэтому с видеокартой не включается.
+    Действует только до импорта torch: решение принимается без него, по драйверу CUDA.
+    """
+    import ctypes.util
+    import importlib.util
+    import os
+
+    backend = cfg.get("detector", {}).get("backend", "auto")
+    if backend == "torch" or importlib.util.find_spec("openvino") is None:
+        return
+    cuda_driver = ctypes.util.find_library("nvcuda" if os.name == "nt" else "cuda")
+    if backend == "openvino" or cfg.get("device", "auto") == "cpu" or not cuda_driver:
+        os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+
+
+def openmp_passive() -> bool:
+    import os
+
+    return os.environ.get("OMP_WAIT_POLICY", "").upper() == "PASSIVE"
 
 
 def resolve_device(device: str, min_vram_gb: float = 0) -> str:

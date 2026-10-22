@@ -41,7 +41,7 @@ class Assistant:
         # Два экземпляра: трекер с постоянным набором классов (смена классов
         # сбросила бы треки) и детектор для запросов «найди …»
         imgsz = d.get("imgsz", 640)
-        self.tracker = Detector(d["weights"], dev, d["conf"], d["standard_classes"], d["tracker"], imgsz)
+        self.tracker = self._make_tracker(d, dev, imgsz, cfg["camera"])
         self.detector = Detector(d["weights"], dev, d["conf"], imgsz=imgsz)
         self.faces = None
         f = cfg.get("faces", {})
@@ -73,7 +73,16 @@ class Assistant:
             self.detector.visual_embedding([blank], [(200, 150, 440, 330)])
         log.info("Открываю камеру…")
         c = cfg["camera"]
-        self.camera = Camera(c["index"], c["width"], c["height"])
+        self.camera = Camera(c["index"], c["width"], c["height"], c.get("fps", 15))
+        self.motion = None
+        m = cfg.get("motion", {})
+        if m.get("enabled", True):
+            from .motion import MotionGate
+
+            self.motion = MotionGate(m.get("width", 160), m.get("local", 0.003),
+                                     m.get("global", 0.15), m.get("history", 300),
+                                     m.get("var_threshold", 25))
+            self.camera.motion = self.motion
 
         self.voice = None
         if voice_input:
@@ -90,9 +99,8 @@ class Assistant:
 
         self.paused = False
         d = cfg["detector"]
-        # трек теряется после 2.5 пропущенных интервалов, иначе в спокойном режиме
-        # один пропуск детекции сбрасывал бы трек и объект объявлялся бы заново
-        self.scene = Scene(lost_after_s=max(1.5, 2.5 * d.get("idle_interval_s", 0)))
+        self.scene = Scene(close_is_change=self.motion is None)
+        self.scan_mode = "active"
         self._commands: queue.Queue[Command | None] = queue.Queue()
         self._busy = threading.Event()   # идёт обработка команды
         self._running = False
@@ -103,6 +111,31 @@ class Assistant:
             from .web import WebUI
 
             self.web = WebUI(self, w.get("host", "127.0.0.1"), w.get("port", 8765))
+
+    @staticmethod
+    def _make_tracker(d: dict, dev: str, imgsz: int, cam: dict):
+        """Трекер: на CPU — OpenVINO (i5-10400: ~50 мс вместо ~86 мс у PyTorch), иначе PyTorch.
+
+        Вход OpenVINO статичный, поэтому берётся прямоугольник под кадр камеры
+        (640×480 → 512×384), а не квадрат: на четверть меньше работы.
+        Без OMP_WAIT_POLICY=PASSIVE (config.prepare_openmp) OpenVINO медленнее PyTorch.
+        """
+        from .config import openmp_passive
+        from .detector import Detector, openvino_available
+
+        backend = d.get("backend", "auto")
+        if backend == "auto":
+            backend = "openvino" if dev == "cpu" and openvino_available() and openmp_passive() else "torch"
+        elif backend == "openvino" and not openmp_passive():
+            log.warning("OMP_WAIT_POLICY не PASSIVE: OpenVINO будет медленнее PyTorch")
+        if backend == "openvino":
+            h = round(imgsz * cam["height"] / cam["width"] / 32) * 32
+            try:
+                return Detector(d["weights"], dev, d["conf"], d["standard_classes"], d["tracker"],
+                                (h, imgsz), backend="openvino")
+            except Exception:
+                log.exception("OpenVINO недоступен, трекер на PyTorch")
+        return Detector(d["weights"], dev, d["conf"], d["standard_classes"], d["tracker"], imgsz)
 
     def p(self, key: str, lang: str | None = None) -> str:
         return lexicon.PHRASES[lang or self.lang][key]
@@ -387,28 +420,54 @@ class Assistant:
 
     # --- фоновый трекинг -------------------------------------------------
     def _scan_loop(self) -> None:
-        """Адаптивная частота: часто, пока сцена меняется или что-то рядом, иначе редко.
+        """Адаптивная частота трекинга, три режима:
 
-        Объект, приближающийся издалека, замечается ещё «далеко» (>4 м) в редком режиме,
-        и первый же кадр с изменением возвращает частый режим.
+        active — сцена меняется (новый/ушедший/приближающийся трек) или движется
+                 весь кадр (человек идёт, поворачивает голову): scan_interval_s;
+        watch  — что-то шевелится в части кадра: watch_interval_s;
+        idle   — движения нет: контрольный прогон раз в idle_interval_s, но любое
+                 движение (MotionGate) будит трекинг сразу.
+        Без детектора движения idle не используется (только active и watch).
         """
         d = self.cfg["detector"]
-        fast, idle = d["scan_interval_s"], d.get("idle_interval_s", d["scan_interval_s"])
+        fast = d["scan_interval_s"]
+        watch = d.get("watch_interval_s", 1.0)
+        idle = d.get("idle_interval_s", 5.0)
         hold = d.get("active_hold_s", 3.0)
-        last_change, interval = 0.0, fast
+        m = self.motion
+        last_change = time.time()  # первые секунды после запуска — частый режим
+        stats = _ScanStats()
         while self._running:
             started = time.time()
+            if m is not None:
+                m.wake.clear()  # движение во время прогона разбудит следующий
             try:
                 self._scan_once()
                 if self.scene.changed:
                     last_change = started
             except Exception:
                 log.exception("Ошибка фонового трекинга")
-            new = fast if started - last_change < hold else idle
-            if new != interval:
-                log.debug("Фоновый трекинг: раз в %.1f с", new)
-                interval = new
-            time.sleep(max(0.0, interval - (time.time() - started)))
+            now = time.time()
+            stats.add(self.scan_mode, now - started)
+            stats.maybe_log(now, m)
+
+            if now - last_change < hold or (m is not None and now - m.last_global < hold):
+                mode = "active"
+            elif m is None or now - m.last_local < hold:
+                mode = "watch"
+            else:
+                mode = "idle"
+            if mode != self.scan_mode:
+                log.debug("Фоновый трекинг: %s", mode)
+                self.scan_mode = mode
+            interval = {"active": fast, "watch": watch, "idle": idle}[mode]
+            if mode == "watch" and self._busy.is_set():
+                interval *= 2  # идёт команда (STT, VLM, перевод): меньше отнимаем у неё CPU
+            left = interval - (now - started)
+            if mode == "idle":
+                m.wake.wait(max(0.0, left))
+            else:
+                time.sleep(max(0.0, left))
 
     def _scan_once(self) -> None:
         """Трекинг идёт всегда (чтобы не терять треки), а говорим только об изменениях."""
@@ -470,13 +529,18 @@ class Assistant:
     def _person_event(self, t, frame, now: float, where: dict, lang: str) -> bool:
         """Узнаёт лицо; True — это новый незнакомец, о котором пора сообщить."""
         f = self.cfg["faces"]
-        if self.faces and t.identity is None and t.face_tries < f["max_tries"]                 and now - t.last_face_try >= f["retry_interval_s"]:
-            t.face_tries += 1
+        near = t.det.distance != "far"
+        if near and t.near_since is None:
+            t.near_since = now
+        # издалека лицо меньше MIN_FACE_PX: не тратим на него ни время, ни попытки
+        if (self.faces and near and t.identity is None and t.face_tries < f["max_tries"]
+                and now - t.last_face_try >= f["retry_interval_s"]):
             t.last_face_try = now
             x1, y1, x2, y2 = map(int, t.det.box)
             crop = frame[max(0, y1):y2, max(0, x1):x2]
             if crop.size:
-                name, _ = self.faces.identify(crop)
+                name, had_face = self.faces.identify(crop)
+                t.face_tries += had_face  # человек спиной — попытка не сгорает
                 if name:
                     t.identity = name
                     t.announced = True
@@ -486,8 +550,41 @@ class Assistant:
         if t.announced or t.identity:
             return False
         # незнакомец: объявляем, когда он рядом и лицо за отведённое время не узнали
-        waited = now - t.first_seen >= f["unknown_after_s"] or not self.faces
-        if t.det.distance != "far" and waited:
+        waited = (not self.faces or t.face_tries >= f["max_tries"]
+                  or near and now - t.near_since >= f["unknown_after_s"])
+        if near and waited:
             t.announced = True
             return True
         return False
+
+
+class _ScanStats:
+    """Сводка фонового трекинга в лог раз в period_s: прогоны, время, режимы, CPU."""
+
+    def __init__(self, period_s: float = 30.0):
+        import os
+
+        self.period_s = period_s
+        self.cores = os.cpu_count() or 1
+        self._reset(time.time())
+
+    def _reset(self, now: float) -> None:
+        self.t0, self.cpu0 = now, time.process_time()
+        self.durations: list[float] = []
+        self.modes: Counter[str] = Counter()
+
+    def add(self, mode: str, duration: float) -> None:
+        self.durations.append(duration)
+        self.modes[mode] += 1
+
+    def maybe_log(self, now: float, motion) -> None:
+        wall = now - self.t0
+        if wall < self.period_s or not self.durations:
+            return
+        ms = sorted(x * 1000 for x in self.durations)
+        cpu = (time.process_time() - self.cpu0) / wall / self.cores * 100
+        modes = ", ".join(f"{k} {v}" for k, v in self.modes.most_common())
+        log.info("Трекинг за %.0f с: %d прогонов (%s), медиана %.0f мс, макс %.0f мс; "
+                 "CPU процесса %.0f%%%s", wall, len(ms), modes, ms[len(ms) // 2], ms[-1], cpu,
+                 f", движение {motion.ratio:.1%}" if motion else "")
+        self._reset(now)

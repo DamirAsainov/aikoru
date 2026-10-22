@@ -5,6 +5,7 @@ accelerate
 sentencepiece
 vosk                      # STT ru + kk, слово активации
 lap                       # нужен ByteTrack (трекер ultralytics)
+openvino>=2024.5          # фоновый трекер на CPU; без него — PyTorch
 silero-vad                # VAD
 silero-stress             # ударения для русского TTS
 sounddevice

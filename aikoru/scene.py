@@ -21,11 +21,13 @@ class Track:
     cx: float                       # центр по x, 0..1
     prev_h: float = 0.0             # высота рамки в прошлом кадре: рост — объект приближается
     hits: int = 1
+    misses: int = 0                 # прогонов подряд, где трека не было
     announced: bool = False         # пользователю уже сообщили об объекте
     danger_level: str | None = None # последняя объявленная дистанция опасности
     identity: str | None = None     # имя знакомого человека
     face_tries: int = 0
     last_face_try: float = 0.0
+    near_since: float | None = None # когда человек впервые подошёл ближе «далеко»
 
     @property
     def confirmed(self) -> bool:
@@ -37,9 +39,16 @@ def _height(t: Track) -> float:
 
 
 class Scene:
-    def __init__(self, lost_after_s: float = 1.5, reappear_window_s: float = 4.0):
+    def __init__(self, lost_after_s: float = 1.5, lost_after_scans: int = 3,
+                 reappear_window_s: float = 4.0, close_is_change: bool = True):
+        # трек теряется, только когда пропал и на lost_after_s, и на lost_after_scans
+        # прогонов: при редком трекинге одна пропущенная детекция не сбрасывает трек
         self.lost_after_s = lost_after_s
+        self.lost_after_scans = lost_after_scans
         self.reappear_window_s = reappear_window_s
+        # без детектора движения близкий объект считается изменением: иначе к
+        # неподвижному столбу можно подойти в редком режиме
+        self.close_is_change = close_is_change
         self.tracks: dict[int, Track] = {}
         self._recently_lost: list[tuple[float, Track]] = []
         # в последнем update что-то менялось: новый трек, потеря, объект рядом или приближается
@@ -58,19 +67,24 @@ class Scene:
                 tr.prev_h = _height(tr)
                 tr.det, tr.last_seen, tr.cx = d, now, cx
                 tr.hits += 1
+                tr.misses = 0
                 approaching |= _height(tr) > tr.prev_h * 1.15
         for d, cx in fresh:  # новые номера — после обновления известных треков
             tr = Track(d.track_id, d.name, d, now, now, cx)
             self._inherit(tr, now)
             self.tracks[d.track_id] = tr
 
-        lost = [t for t in self.tracks.values() if now - t.last_seen > self.lost_after_s]
+        for t in self.tracks.values():
+            if t.last_seen < now:
+                t.misses += 1
+        lost = [t for t in self.tracks.values() if now - t.last_seen > self.lost_after_s
+                and t.misses >= self.lost_after_scans]
         for t in lost:
             del self.tracks[t.id]
             if t.confirmed:
                 self._recently_lost.append((now, t))
         self.changed = bool(fresh or lost or approaching
-                            or any(d.distance != "far" for d in dets))
+                            or self.close_is_change and any(d.distance != "far" for d in dets))
         gone = [t for ts, t in self._recently_lost if now - ts >= self.reappear_window_s]
         self._recently_lost = [(ts, t) for ts, t in self._recently_lost
                                if now - ts < self.reappear_window_s]
@@ -97,6 +111,6 @@ class Scene:
             del self.tracks[key]
         tr.announced, tr.identity = old.announced, old.identity
         tr.danger_level, tr.face_tries = old.danger_level, old.face_tries
-        tr.last_face_try = old.last_face_try
+        tr.last_face_try, tr.near_since = old.last_face_try, old.near_since
         tr.hits = max(tr.hits, old.hits)
         tr.first_seen = old.first_seen

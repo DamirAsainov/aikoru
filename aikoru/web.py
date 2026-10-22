@@ -69,6 +69,9 @@ class WebUI:
         self.server = ThreadingHTTPServer((host, port), handler)
         self.server.daemon_threads = True
         self.url = f"http://{host}:{port}"
+        self._jpeg: bytes | None = None
+        self._jpeg_ts = 0.0
+        self._jpeg_lock = threading.Lock()
 
     def start(self) -> None:
         threading.Thread(target=self.server.serve_forever, name="web", daemon=True).start()
@@ -79,11 +82,21 @@ class WebUI:
         self.server.shutdown()
 
     # --- данные --------------------------------------------------------------
+    def jpeg(self) -> bytes | None:
+        """Кадр в JPEG, общий для всех клиентов: кодируется не чаще ~12 раз/с."""
+        with self._jpeg_lock:
+            now = time.time()
+            if now - self._jpeg_ts >= 0.07:
+                ok, jpg = cv2.imencode(".jpg", self.a.camera.read(), [cv2.IMWRITE_JPEG_QUALITY, 70])
+                self._jpeg = jpg.tobytes() if ok else None
+                self._jpeg_ts = now
+            return self._jpeg
+
     def tracks(self) -> list[dict]:
         lang = self.a.lang
         out = []
         for t in list(self.a.scene.tracks.values()):
-            if not t.confirmed or time.time() - t.last_seen > 0.6:
+            if not t.confirmed or t.misses:  # трекинг бывает и раз в 5 с: важен последний прогон
                 continue
             d = t.det
             out.append({
@@ -142,8 +155,8 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/stream.mjpg":
             return self._stream()
         if path == "/frame.jpg":
-            ok, jpg = cv2.imencode(".jpg", self.ui.a.camera.read(), [cv2.IMWRITE_JPEG_QUALITY, 70])
-            return self._send(200 if ok else 503, jpg.tobytes() if ok else b"", "image/jpeg")
+            jpg = self.ui.jpeg()
+            return self._send(200 if jpg else 503, jpg or b"", "image/jpeg")
         if path == "/events":
             return self._events()
         if path == "/api/state":
@@ -163,10 +176,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             while True:
-                ok, jpg = cv2.imencode(".jpg", self.ui.a.camera.read(), [cv2.IMWRITE_JPEG_QUALITY, 70])
-                if ok:
+                jpg = self.ui.jpeg()
+                if jpg:
                     self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
-                                     + str(len(jpg)).encode() + b"\r\n\r\n" + jpg.tobytes() + b"\r\n")
+                                     + str(len(jpg)).encode() + b"\r\n\r\n" + jpg + b"\r\n")
                 time.sleep(0.08)
         except (ConnectionError, OSError):
             pass
