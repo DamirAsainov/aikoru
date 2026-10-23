@@ -82,10 +82,12 @@ vlm:
   min_vram_gb: 4
   image_tokens: 64               # 64 — быстро; 128–256 — больше деталей и мелкого текста
   max_new_tokens: 40
+  threads: 0                     # потоки CPU на ответ; 0 — половина ядер, остальное трекеру
 
 translator:
   repo: JustFrederik/nllb-200-distilled-600M-ct2-int8   # NLLB-200 600M, CTranslate2 int8
   path: nllb-200-600M-ct2-int8
+  threads: 2                     # потоки CPU на фразу (0 — по умолчанию CTranslate2)
   device: cpu                    # int8 на CPU: 0.1–0.3 с на фразу, VRAM остаётся для YOLOE
 
 voice:

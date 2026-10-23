@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from pathlib import Path
 
@@ -44,7 +45,8 @@ def ensure_tokenizer_compat(model_dir: str | Path) -> None:
 
 
 class SceneDescriber:
-    def __init__(self, model_dir: str, device: str, image_tokens: int = 64, max_new_tokens: int = 40):
+    def __init__(self, model_dir: str, device: str, image_tokens: int = 64, max_new_tokens: int = 40,
+                 threads: int = 0):
         import torch
         from transformers import AutoModelForImageTextToText, AutoProcessor
         from transformers.utils import logging as hf_logging
@@ -67,6 +69,8 @@ class SceneDescriber:
         self.proc = AutoProcessor.from_pretrained(model_dir, **kw)
         self.device = device
         self.max_new_tokens = max_new_tokens
+        # половина ядер: трекер во время ответа VLM не должен остаться без CPU
+        self.threads = threads or max(1, (os.cpu_count() or 2) // 2)
         self._lock = threading.Lock()
 
     def _generate(self, frame: np.ndarray, text: str) -> str:
@@ -80,7 +84,13 @@ class SceneDescriber:
             inputs["pixel_values"] = inputs["pixel_values"].to(self.model.dtype)
         n = inputs["input_ids"].shape[1]
         with self._lock, torch.inference_mode():
-            out = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
+            prev = torch.get_num_threads()
+            if self.device == "cpu":
+                torch.set_num_threads(self.threads)
+            try:
+                out = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
+            finally:
+                torch.set_num_threads(prev)
         answer = self.proc.batch_decode(out[:, n:], skip_special_tokens=True)[0].strip()
         # ответ обрезан лимитом токенов — оставляем только законченные предложения
         if "." in answer and not answer.endswith((".", "!", "?")):

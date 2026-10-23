@@ -30,6 +30,7 @@ class MotionGate:
         self.last_local = 0.0       # time.time() последнего локального движения
         self.last_global = 0.0      # time.time() последнего движения всего кадра
         self.wake = threading.Event()  # будит трекинг из спокойного режима
+        self._ratios: list[float] = []  # доли движения с прошлого drain() — для калибровки порогов
 
     def feed(self, frame: np.ndarray) -> None:
         now = time.time()
@@ -44,8 +45,14 @@ class MotionGate:
             self._warmup -= 1
             return
         self.ratio = cv2.countNonZero(mask) / mask.size
+        self._ratios.append(self.ratio)
         if self.ratio >= self.global_:
             self.last_global = now
         if self.ratio >= self.local:
             self.last_local = now
             self.wake.set()
+
+    def drain(self) -> list[float]:
+        """Доли движения всех кадров с прошлого вызова."""
+        ratios, self._ratios = self._ratios, []
+        return ratios

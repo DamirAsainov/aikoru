@@ -13,6 +13,7 @@ import cv2
 
 from . import lexicon
 from .commands import Command, parse, pick_language
+from .faces import is_sharp
 from .tts import ANSWER, DANGER, INFO
 
 log = logging.getLogger(__name__)
@@ -91,6 +92,8 @@ class Assistant:
             raise opened["error"]
         self.camera = opened["camera"]
         self.motion = None
+        # ответы VLM по вопросу ("" — описание сцены): (время кадра, текст на английском)
+        self._answers: dict[str, tuple[float, str]] = {}
         m = cfg.get("motion", {})
         if m.get("enabled", True):
             from .motion import MotionGate
@@ -138,7 +141,8 @@ class Assistant:
         cfg = self.cfg
         try:
             log.info("Загрузка переводчика (NLLB) в фоне…")
-            self._translator = Translator(cfg["translator"]["path"], cfg["translator"]["device"])
+            self._translator = Translator(cfg["translator"]["path"], cfg["translator"]["device"],
+                                         cfg["translator"].get("threads", 0))
         except Exception:
             log.exception("Переводчик не загрузился")
         finally:
@@ -146,7 +150,8 @@ class Assistant:
         try:
             v = cfg["vlm"]
             log.info("Загрузка VLM (%s, %s) в фоне…", Path(v["path"]).name, v["device"])
-            vlm = SceneDescriber(v["path"], v["device"], v["image_tokens"], v["max_new_tokens"])
+            vlm = SceneDescriber(v["path"], v["device"], v["image_tokens"], v["max_new_tokens"],
+                                 v.get("threads", 0))
             vlm.describe(np.zeros((480, 640, 3), dtype=np.uint8))  # первый вызов в разы медленнее
             self._vlm = vlm
             log.info("VLM готова")
@@ -306,8 +311,15 @@ class Assistant:
             self.paused = False
             self.tts.say(self.p("resumed"), lang, ANSWER)
         elif cmd.intent == "describe":
+            last = self._answers.get("")
+            if last and self._scene_static_since(last[0]):
+                log.info("Сцена не менялась с прошлого описания — повторяю ответ")
+                self.tts.say(self.translator.translate(last[1], "en", lang), lang, ANSWER)
+                return
             self.tts.say(self.p("looking"), lang, ANSWER)
+            started = time.time()
             caption = self.vlm.describe(self.camera.read())
+            self._answers[""] = (started, caption)
             log.info("VLM: %s", caption)
             self.tts.say(self.translator.translate(caption, "en", lang), lang, ANSWER)
         elif cmd.intent == "find":
@@ -319,13 +331,28 @@ class Assistant:
         elif cmd.intent in ("who", "remember", "forget", "memory"):
             getattr(self, f"_{cmd.intent}")(cmd)
         elif cmd.intent == "ask":
-            self.tts.say(self.p("looking"), lang, ANSWER)
             question = self.translator.translate(cmd.text, lang, "en")
+            last = self._answers.get(question)
+            if last and self._scene_static_since(last[0]):
+                log.info("Сцена не менялась — повторяю ответ на «%s»", question)
+                self.tts.say(self.translator.translate(last[1], "en", lang), lang, ANSWER)
+                return
+            self.tts.say(self.p("looking"), lang, ANSWER)
+            started = time.time()
             answer = self.vlm.ask(self.camera.read(), question)
+            if len(self._answers) >= 16:
+                self._answers.pop(next(iter(self._answers)))
+            self._answers[question] = (started, answer)
             log.info("Вопрос: %s → %s", question, answer)
             self.tts.say(self.translator.translate(answer, "en", lang), lang, ANSWER)
         else:
             self.tts.say(self.p("not_heard"), lang, ANSWER)
+
+    def _scene_static_since(self, ts: float, max_age_s: float = 120.0) -> bool:
+        """С кадра ts в сцене не было движения и изменений — прошлый ответ VLM ещё верен."""
+        m = self.motion
+        return (m is not None and m.last_local < ts and time.time() - ts < max_age_s
+                and not self.scene.changed)
 
     def _to_english(self, text: str, lang: str) -> str:
         en = self.translator.translate(text, lang, "en").lower().strip(" .!?")
@@ -601,7 +628,7 @@ class Assistant:
             t.last_face_try = now
             x1, y1, x2, y2 = map(int, t.det.box)
             crop = frame[max(0, y1):y2, max(0, x1):x2]
-            if crop.size:
+            if crop.size and is_sharp(crop):
                 name, had_face = self.faces.identify(crop)
                 t.face_tries += had_face  # человек спиной — попытка не сгорает
                 if name:
@@ -613,8 +640,9 @@ class Assistant:
         if t.announced or t.identity:
             return False
         # незнакомец: объявляем, когда он рядом и лицо за отведённое время не узнали
+        # пока лицо ни разу не нашли, «незнакомец» ничего не значит: ждём втрое дольше
         waited = (not self.faces or t.face_tries >= f["max_tries"]
-                  or near and now - t.near_since >= f["unknown_after_s"])
+                  or near and now - t.near_since >= f["unknown_after_s"] * (1 if t.face_tries else 3))
         if near and waited:
             t.announced = True
             return True
@@ -640,6 +668,17 @@ class _ScanStats:
         self.durations.append(duration)
         self.modes[mode] += 1
 
+    @staticmethod
+    def _motion_summary(motion) -> str:
+        """Медиана, p90 и максимум доли движения за период — для подбора motion.local/global."""
+        if not motion:
+            return ""
+        r = sorted(motion.drain())
+        if not r:
+            return ""
+        return (f", движение: медиана {r[len(r) // 2]:.2%}, p90 {r[int(len(r) * 0.9)]:.2%}"
+                f", макс {r[-1]:.2%}")
+
     def maybe_log(self, now: float, motion) -> None:
         wall = now - self.t0
         if wall < self.period_s or not self.durations:
@@ -649,5 +688,5 @@ class _ScanStats:
         modes = ", ".join(f"{k} {v}" for k, v in self.modes.most_common())
         log.info("Трекинг за %.0f с: %d прогонов (%s), медиана %.0f мс, макс %.0f мс; "
                  "CPU процесса %.0f%%%s", wall, len(ms), modes, ms[len(ms) // 2], ms[-1], cpu,
-                 f", движение {motion.ratio:.1%}" if motion else "")
+                 self._motion_summary(motion))
         self._reset(now)

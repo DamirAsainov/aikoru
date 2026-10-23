@@ -23,6 +23,13 @@ FACE_URLS = {
 }
 MIN_FACE_PX = 40          # меньшие лица распознаются ненадёжно
 MAX_SAMPLES_PER_NAME = 10
+MIN_SHARPNESS = 25.0      # дисперсия лапласиана: смазанный кадр лица даёт ложное «не узнан»
+
+
+def is_sharp(image: np.ndarray, threshold: float = MIN_SHARPNESS) -> bool:
+    """Достаточно ли резкий кроп, чтобы тратить на него YuNet + SFace."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var()) >= threshold
 
 
 class FaceBook:
