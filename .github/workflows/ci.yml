@@ -21,6 +21,8 @@ jobs:
 
     - name: Install dependencies
       run: |
+        # sounddevice (voice.py) без системной PortAudio не импортируется
+        sudo apt-get update && sudo apt-get install -y libportaudio2
         python -m pip install --upgrade pip
         pip install ruff pytest
         # CPU-версии PyTorch для ускорения CI

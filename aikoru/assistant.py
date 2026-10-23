@@ -22,9 +22,7 @@ class Assistant:
     def __init__(self, cfg: dict, voice_input: bool = True, show: bool = False, web: bool = True):
         from .camera import Camera
         from .detector import Detector
-        from .translator import Translator
         from .tts import Speaker
-        from .vlm import SceneDescriber
 
         self.cfg = cfg
         self.lang = cfg["default_language"]
@@ -35,6 +33,19 @@ class Assistant:
         log.info("Загрузка TTS (Silero)…")
         self.tts = Speaker(cfg["models_dir"], t["model"], t["voice"], t["sample_rate"], "cpu")
         self.tts.say(self.p("loading"), self.lang)
+
+        # камера открывается 2–4 с (DirectShow): параллельно с загрузкой YOLOE
+        c = cfg["camera"]
+        opened: dict = {}
+
+        def open_camera() -> None:
+            try:
+                opened["camera"] = Camera(c["index"], c["width"], c["height"], c.get("fps", 15))
+            except (RuntimeError, cv2.error) as e:  # ошибка всплывёт в основном потоке
+                opened["error"] = e
+
+        camera_thread = threading.Thread(target=open_camera, name="camera-open", daemon=True)
+        camera_thread.start()
 
         d = cfg["detector"]
         log.info("Загрузка YOLOE…")
@@ -57,23 +68,28 @@ class Assistant:
             from .objects import ObjectBook
 
             self.objects = ObjectBook(cfg["objects"]["db"])
-        log.info("Загрузка переводчика (NLLB)…")
-        self.translator = Translator(cfg["translator"]["path"], cfg["translator"]["device"])
-        v = cfg["vlm"]
-        log.info("Загрузка VLM (%s, %s)…", Path(v["path"]).name, v["device"])
-        self.vlm = SceneDescriber(v["path"], v["device"], v["image_tokens"], v["max_new_tokens"])
-        log.info("Прогрев моделей…")  # первый вызов VLM/YOLOE в разы медленнее
+        # NLLB и VLM нужны только командам: грузятся в фоне, а «Система готова»
+        # звучит, как только работают трекинг, камера и голос. Поток стартует
+        # после YOLOE, чтобы импорты ultralytics и transformers не шли одновременно.
+        self._translator = None
+        self._vlm = None
+        self._translator_ready = threading.Event()
+        self._vlm_ready = threading.Event()
+        self._said_loading = 0.0
+        threading.Thread(target=self._load_heavy, name="load-heavy", daemon=True).start()
+
+        log.info("Прогрев YOLOE…")  # первый вызов в разы медленнее
         import numpy as np
 
         blank = np.zeros((480, 640, 3), dtype=np.uint8)
-        self.vlm.describe(blank)
         self.detector.detect(blank, ["door"])
         self.tracker.track(blank)
         if self.objects is not None:  # первый визуальный промпт строит predictor (~1 с)
             self.detector.visual_embedding([blank], [(200, 150, 440, 330)])
-        log.info("Открываю камеру…")
-        c = cfg["camera"]
-        self.camera = Camera(c["index"], c["width"], c["height"], c.get("fps", 15))
+        camera_thread.join()
+        if "error" in opened:
+            raise opened["error"]
+        self.camera = opened["camera"]
         self.motion = None
         m = cfg.get("motion", {})
         if m.get("enabled", True):
@@ -111,6 +127,53 @@ class Assistant:
             from .web import WebUI
 
             self.web = WebUI(self, w.get("host", "127.0.0.1"), w.get("port", 8765))
+
+    def _load_heavy(self) -> None:
+        """Фоновая загрузка: сначала NLLB (нужен и для «найди …»), потом VLM с прогревом."""
+        import numpy as np
+
+        from .translator import Translator
+        from .vlm import SceneDescriber
+
+        cfg = self.cfg
+        try:
+            log.info("Загрузка переводчика (NLLB) в фоне…")
+            self._translator = Translator(cfg["translator"]["path"], cfg["translator"]["device"])
+        except Exception:
+            log.exception("Переводчик не загрузился")
+        finally:
+            self._translator_ready.set()
+        try:
+            v = cfg["vlm"]
+            log.info("Загрузка VLM (%s, %s) в фоне…", Path(v["path"]).name, v["device"])
+            vlm = SceneDescriber(v["path"], v["device"], v["image_tokens"], v["max_new_tokens"])
+            vlm.describe(np.zeros((480, 640, 3), dtype=np.uint8))  # первый вызов в разы медленнее
+            self._vlm = vlm
+            log.info("VLM готова")
+        except Exception:
+            log.exception("VLM не загрузилась")
+        finally:
+            self._vlm_ready.set()
+
+    @property
+    def translator(self):
+        return self._wait_model(self._translator_ready, "_translator")
+
+    @property
+    def vlm(self):
+        return self._wait_model(self._vlm_ready, "_vlm")
+
+    def _wait_model(self, ready: threading.Event, attr: str):
+        """Команда пришла раньше, чем модель догрузилась: предупредить и дождаться."""
+        if not ready.is_set():
+            if time.time() - self._said_loading > 10:  # одна фраза на команду, а не на модель
+                self._said_loading = time.time()
+                self.tts.say(self.p("still_loading"), self.lang, ANSWER)
+            ready.wait()
+        model = getattr(self, attr)
+        if model is None:
+            raise RuntimeError(f"Модель {attr.lstrip('_')} не загрузилась, см. лог выше")
+        return model
 
     @staticmethod
     def _make_tracker(d: dict, dev: str, imgsz: int, cam: dict):
