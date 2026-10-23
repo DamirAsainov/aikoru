@@ -16,7 +16,6 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 import numpy as np
-import sounddevice as sd
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +128,7 @@ class VoiceInput:
         self._audio.put(bytes(indata))
 
     def _loop(self) -> None:
+        import sounddevice as sd  # не в начале модуля: без аудиосервера (CI) импорт падает
         import torch
 
         wake_recs = {lang: self._new_rec(lang) for lang in self.models}
