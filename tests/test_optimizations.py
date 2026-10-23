@@ -69,3 +69,48 @@ def test_scene_static_since():
     assert not check(_static(SimpleNamespace(last_local=0), True), now - 5)       # сцена изменилась
     assert not check(_static(SimpleNamespace(last_local=0)), now - 500)           # устарело
     assert not check(_static(None), now - 5)                                      # нет детектора
+
+
+def test_trim_answer_drops_unfinished_sentence():
+    from aikoru.vlm import trim_answer
+
+    assert trim_answer(" A bus. Two people are cro") == "A bus."
+    assert trim_answer("A bus on the street") == "A bus on the street"
+    assert trim_answer("Yes!") == "Yes!"
+
+
+def test_resolve_vlm_backend(tmp_path):
+    import os
+
+    from aikoru.config import resolve_vlm_backend
+
+    def cfg(**kw):
+        return {"device": "cpu", "gguf": "g/m.gguf", "mmproj": "g/p.gguf", **kw}
+
+    v = cfg()
+    resolve_vlm_backend(v, tmp_path)
+    assert v["backend"] == "transformers"  # файлов нет
+
+    (tmp_path / "g").mkdir()
+    (tmp_path / "llama.cpp").mkdir()
+    for f in ("g/m.gguf", "g/p.gguf", "llama.cpp/" + ("llama-server.exe" if os.name == "nt" else "llama-server")):
+        (tmp_path / f).write_bytes(b"")
+    v = cfg()
+    resolve_vlm_backend(v, tmp_path)
+    assert v["backend"] == "llamacpp" and v["gguf"] == str(tmp_path / "g/m.gguf")
+    v = cfg(device="cuda")
+    resolve_vlm_backend(v, tmp_path)
+    assert v["backend"] == "transformers"  # на GPU остаётся transformers
+    v = cfg(backend="transformers")
+    resolve_vlm_backend(v, tmp_path)
+    assert v["backend"] == "transformers"
+
+
+def test_calib_frames(tmp_path):
+    from aikoru.detector import calib_frames
+
+    assert calib_frames(None) == []
+    assert calib_frames(tmp_path / "нет") == []
+    for n in ("a.jpg", "b.PNG", "c.txt"):
+        (tmp_path / n).write_bytes(b"")
+    assert [p.name for p in calib_frames(tmp_path)] == ["a.jpg", "b.PNG"]

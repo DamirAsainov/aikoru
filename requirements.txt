@@ -1,11 +1,13 @@
 # torch/torchvision/torchaudio ставятся отдельно под вашу CUDA, см. README
-ultralytics>=8.3.150      # YOLOE
+ultralytics>=8.4          # YOLOE (yoloe-26 — с 8.4)
 transformers>=4.57,<5    # LFM2-VL; 5.x не проверялся с остальными моделями
 accelerate
 sentencepiece
 vosk                      # STT ru + kk, слово активации
 lap                       # нужен ByteTrack (трекер ultralytics)
-openvino>=2024.5          # фоновый трекер на CPU; без него — PyTorch
+openvino>=2026.0          # фоновый трекер на CPU; без него — PyTorch
+nncf>=3.0                 # INT8-калибровка трекера (detector.int8)
+wcwidth                   # нужен ftfy → clip (текстовый энкодер YOLOE), сам не ставится
 silero-vad                # VAD
 silero-stress             # ударения для русского TTS
 sounddevice

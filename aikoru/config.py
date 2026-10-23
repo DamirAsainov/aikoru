@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import yaml
@@ -19,12 +20,30 @@ def load_config(path: str | Path | None = None) -> dict:
     for section in ("faces", "objects"):
         if section in cfg:
             cfg[section]["db"] = str(ROOT / cfg[section]["db"])
+    if cfg.get("detector", {}).get("calib_dir"):
+        cfg["detector"]["calib_dir"] = str(ROOT / cfg["detector"]["calib_dir"])
     for section in ("vlm", "translator"):
         cfg[section]["path"] = str(Path(cfg["models_dir"]) / cfg[section]["path"])
         # тяжёлым моделям GPU нужен только при достаточном запасе VRAM, иначе — CPU
         cfg[section]["device"] = resolve_device(cfg[section].get("device", "auto"),
                                                 cfg[section].get("min_vram_gb", 0))
+    resolve_vlm_backend(cfg["vlm"], Path(cfg["models_dir"]))
     return cfg
+
+
+def resolve_vlm_backend(v: dict, models: Path) -> None:
+    """backend: auto → llama.cpp, если скачаны сервер и GGUF и VLM пойдёт на CPU, иначе transformers."""
+    server = models / "llama.cpp" / ("llama-server.exe" if os.name == "nt" else "llama-server")
+    v["server"] = str(server)
+    for key in ("gguf", "mmproj"):
+        if v.get(key):
+            v[key] = str(models / v[key])
+    backend = v.get("backend", "auto")
+    if backend == "auto":
+        files = [server, Path(v["gguf"]), Path(v["mmproj"])] if v.get("gguf") and v.get("mmproj") else []
+        ready = files and all(f.exists() for f in files)
+        backend = "llamacpp" if ready and v.get("device") == "cpu" else "transformers"
+    v["backend"] = backend
 
 
 def prepare_openmp(cfg: dict) -> None:

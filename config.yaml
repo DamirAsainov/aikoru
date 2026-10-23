@@ -16,10 +16,17 @@ camera:
   fps: 15                       # меньше кадров — меньше декодирования; камера может округлить
 
 detector:
-  weights: yoloe-11s-seg.pt     # скачивается ultralytics автоматически (маски не считаются)
+  # скачивается ultralytics автоматически (маски не считаются). yoloe-26n-seg.pt втрое быстрее,
+  # но на coco128 находит меньше людей (124 против 146 из 254) — только для очень слабых машин
+  weights: yoloe-11s-seg.pt
   imgsz: 512                    # 640 — точнее вдали; 512 — на ~35% быстрее; 416 и меньше теряет крупные планы
   conf: 0.30
   backend: auto                 # трекер: auto (CPU → OpenVINO, если установлен) | torch | openvino
+  # INT8 для OpenVINO-трекера: в 4–5 раз быстрее FP32 (11s: ~25 мс против ~85–130 мс),
+  # полнота на coco128 та же. Калибровка на своих кадрах (python scripts/capture_calib.py),
+  # экспорт один раз при запуске. Пока кадров в calib_dir нет — FP32
+  int8: true
+  calib_dir: data/calib
   # Частота фонового трекинга зависит от режима (см. motion):
   scan_interval_s: 0.3          # active: сцена меняется или человек идёт/поворачивается
   watch_interval_s: 1.0         # watch: что-то шевелится в части кадра (без motion — спокойная сцена)
@@ -77,7 +84,15 @@ vlm:
   # HuggingFaceTB/SmolVLM-256M-Instruct (path: smolvlm-256m), ~1 с, чаще ошибается
   repo: LiquidAI/LFM2.5-VL-450M
   revision: main
-  path: lfm2.5-vl-450m           # локальная папка внутри models/
+  path: lfm2.5-vl-450m           # локальная папка внутри models/ (transformers)
+  # llama.cpp: та же модель в GGUF, ~0.5 ГБ вместо ~1.7 ГБ и быстрее на CPU.
+  # auto — llama.cpp, если файлы скачаны (scripts/download_models.py), иначе transformers
+  backend: auto                  # auto | llamacpp | transformers
+  gguf_repo: LiquidAI/LFM2.5-VL-450M-GGUF
+  gguf: lfm2.5-vl-450m-gguf/LFM2.5-VL-450M-Q8_0.gguf
+  mmproj: lfm2.5-vl-450m-gguf/mmproj-LFM2.5-VL-450m-Q8_0.gguf
+  llama_cpp_release: b11840      # сборка llama.cpp (CPU, Windows/Linux) с GitHub
+  port: 8766                     # llama-server слушает только 127.0.0.1
   device: auto                   # auto: GPU только при min_vram_gb, иначе CPU (fp32)
   min_vram_gb: 4
   image_tokens: 64               # 64 — быстро; 128–256 — больше деталей и мелкого текста

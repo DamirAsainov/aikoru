@@ -19,6 +19,7 @@ from aikoru.tts import SILERO_URL, tts_model_path  # noqa: E402
 from scripts.hf_fetch import fetch_repo  # noqa: E402
 
 VOSK_URL = "https://alphacephei.com/vosk/models/{name}.zip"
+LLAMA_CPP_URL = "https://github.com/ggml-org/llama.cpp/releases/download/{tag}/llama-{tag}-bin-{asset}"
 log = logging.getLogger("download")
 
 
@@ -26,6 +27,33 @@ def fetch(url: str) -> bytes:
     log.info("Скачиваю %s", url)
     with urllib.request.urlopen(url) as r:
         return r.read()
+
+
+def fetch_llama_cpp(v: dict, models: Path) -> None:
+    """llama-server (CPU-сборка) и GGUF-файлы VLM для backend: llamacpp."""
+    import os
+    import tarfile
+
+    server = Path(v["server"])
+    if not server.exists() and v.get("llama_cpp_release"):
+        asset = "win-cpu-x64.zip" if os.name == "nt" else "ubuntu-x64.tar.gz"
+        data = fetch(LLAMA_CPP_URL.format(tag=v["llama_cpp_release"], asset=asset))
+        server.parent.mkdir(parents=True, exist_ok=True)
+        if asset.endswith(".zip"):
+            zipfile.ZipFile(io.BytesIO(data)).extractall(server.parent)
+        else:  # в архиве папка llama-<tag>/: кладём содержимое прямо в models/llama.cpp
+            with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+                for m in tar.getmembers():
+                    m.name = m.name.split("/", 1)[-1]
+                    if m.name and (m.isfile() or m.issym()):
+                        tar.extract(m, server.parent, filter="data")
+    for key in ("gguf", "mmproj"):
+        out = Path(v[key]) if v.get(key) else None
+        if out and not out.exists():
+            out.parent.mkdir(parents=True, exist_ok=True)
+            tmp = out.with_suffix(".part")
+            tmp.write_bytes(fetch(f"https://huggingface.co/{v['gguf_repo']}/resolve/main/{out.name}"))
+            tmp.replace(out)
 
 
 def main() -> None:
@@ -63,6 +91,7 @@ def main() -> None:
     v = cfg["vlm"]
     fetch_repo(v["repo"], v["revision"], v["path"], exclude=[".gguf", ".png", ".jpg", ".md", "onnx/"])
     ensure_tokenizer_compat(v["path"])
+    fetch_llama_cpp(v, models)
     t = cfg["translator"]
     fetch_repo(t["repo"], "main", t["path"], exclude=[".md"])
 

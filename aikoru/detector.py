@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import numpy as np
+import yaml
 
 log = logging.getLogger(__name__)
 
@@ -102,22 +103,45 @@ def openvino_available() -> bool:
     return importlib.util.find_spec("openvino") is not None
 
 
-def export_openvino(weights: str, classes: list[str], imgsz: tuple[int, int]) -> str:
-    """YOLOE с зашитыми классами → модель OpenVINO (FP32, статичный вход h×w).
+MIN_CALIB_FRAMES = 50
+
+
+def calib_frames(calib_dir: str | Path | None) -> list[Path]:
+    """Кадры для калибровки INT8 (scripts/capture_calib.py)."""
+    if not calib_dir or not Path(calib_dir).is_dir():
+        return []
+    return sorted(p for p in Path(calib_dir).iterdir() if p.suffix.lower() in (".jpg", ".jpeg", ".png"))
+
+
+def export_openvino(weights: str, classes: list[str], imgsz: tuple[int, int],
+                    calib_dir: str | Path | None = None) -> str:
+    """YOLOE с зашитыми классами → модель OpenVINO (статичный вход h×w).
 
     Текстовые эмбеддинги впекаются в голову детекции, поэтому классы после
     экспорта не меняются: подходит только для трекера с постоянным набором.
-    Экспорт делается один раз (~1 мин) и кладётся рядом с весами.
+    calib_dir — папка своих кадров с камеры: тогда модель INT8 (NNCF), без неё FP32.
+    Экспорт делается один раз (FP32 ~1 мин, INT8 ещё ~1–3 мин) и кладётся рядом с весами.
     """
     key = hashlib.sha1("|".join(classes).encode()).hexdigest()[:8]
     stem = Path(weights).stem.removesuffix("-seg")
-    out = Path(weights).resolve().parent / f"{stem}-{key}-{imgsz[0]}x{imgsz[1]}_openvino_model"
+    int8 = calib_dir is not None
+    out = (Path(weights).resolve().parent
+           / f"{stem}-{key}-{imgsz[0]}x{imgsz[1]}{'-int8' if int8 else ''}_openvino_model")
     if (out / "metadata.yaml").exists():
         return str(out)
-    log.info("Экспорт трекера в OpenVINO (%dx%d), один раз…", *imgsz)
+    log.info("Экспорт трекера в OpenVINO %s (%dx%d), один раз…", "INT8" if int8 else "FP32", *imgsz)
     model = load_yoloe(weights)
     model.set_classes(list(classes), TextEmbeddings.for_weights(weights).get(model, list(classes)))
-    tmp = Path(model.export(format="openvino", imgsz=list(imgsz), half=False, dynamic=False))
+    kw = {}
+    if int8:
+        # ultralytics берёт калибровочные кадры из yaml датасета; разметка не нужна
+        data = out.with_name(out.name + "_calib.yaml")
+        data.write_text(yaml.safe_dump({
+            "path": Path(calib_dir).resolve().as_posix(), "train": ".", "val": ".",
+            "names": dict(enumerate(classes)),
+        }, allow_unicode=True), encoding="utf-8")
+        kw = {"int8": True, "data": str(data), "fraction": 1.0}
+    tmp = Path(model.export(format="openvino", imgsz=list(imgsz), half=False, dynamic=False, **kw))
     tmp.replace(out)
     return str(out)
 
@@ -125,9 +149,11 @@ def export_openvino(weights: str, classes: list[str], imgsz: tuple[int, int]) ->
 class Detector:
     def __init__(self, weights: str, device: str, conf: float = 0.3,
                  classes: list[str] | None = None, tracker: str = "bytetrack.yaml",
-                 imgsz: int | tuple[int, int] = 640, backend: str = "torch"):
+                 imgsz: int | tuple[int, int] = 640, backend: str = "torch",
+                 calib_dir: str | Path | None = None):
         """backend="openvino" — только для трекера: классы фиксируются при экспорте,
-        detect() с другими классами и visual_embedding() недоступны."""
+        detect() с другими классами и visual_embedding() недоступны.
+        calib_dir — кадры для INT8-калибровки OpenVINO-модели (None — FP32)."""
         self.backend = backend
         self.device = device
         self.conf = conf
@@ -144,7 +170,7 @@ class Detector:
             if not classes:
                 raise ValueError("OpenVINO-детектору нужен постоянный набор классов")
             size = imgsz if isinstance(imgsz, tuple) else (imgsz, imgsz)
-            self.model = YOLO(export_openvino(weights, classes, size), task="detect")
+            self.model = YOLO(export_openvino(weights, classes, size, calib_dir), task="detect")
             self._current = tuple(classes)
             return
         self.model = load_yoloe(weights)

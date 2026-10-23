@@ -136,7 +136,7 @@ class Assistant:
         import numpy as np
 
         from .translator import Translator
-        from .vlm import SceneDescriber
+        from .vlm import LlamaCppDescriber, SceneDescriber
 
         cfg = self.cfg
         try:
@@ -149,9 +149,14 @@ class Assistant:
             self._translator_ready.set()
         try:
             v = cfg["vlm"]
-            log.info("Загрузка VLM (%s, %s) в фоне…", Path(v["path"]).name, v["device"])
-            vlm = SceneDescriber(v["path"], v["device"], v["image_tokens"], v["max_new_tokens"],
-                                 v.get("threads", 0))
+            if v.get("backend") == "llamacpp":
+                log.info("Загрузка VLM (%s, llama.cpp) в фоне…", Path(v["gguf"]).name)
+                vlm = LlamaCppDescriber(v["server"], v["gguf"], v["mmproj"], v["image_tokens"],
+                                        v["max_new_tokens"], v.get("threads", 0), v.get("port", 8766))
+            else:
+                log.info("Загрузка VLM (%s, %s) в фоне…", Path(v["path"]).name, v["device"])
+                vlm = SceneDescriber(v["path"], v["device"], v["image_tokens"], v["max_new_tokens"],
+                                     v.get("threads", 0))
             vlm.describe(np.zeros((480, 640, 3), dtype=np.uint8))  # первый вызов в разы медленнее
             self._vlm = vlm
             log.info("VLM готова")
@@ -189,7 +194,7 @@ class Assistant:
         Без OMP_WAIT_POLICY=PASSIVE (config.prepare_openmp) OpenVINO медленнее PyTorch.
         """
         from .config import openmp_passive
-        from .detector import Detector, openvino_available
+        from .detector import MIN_CALIB_FRAMES, Detector, calib_frames, openvino_available
 
         backend = d.get("backend", "auto")
         if backend == "auto":
@@ -198,9 +203,17 @@ class Assistant:
             log.warning("OMP_WAIT_POLICY не PASSIVE: OpenVINO будет медленнее PyTorch")
         if backend == "openvino":
             h = round(imgsz * cam["height"] / cam["width"] / 32) * 32
+            calib = None
+            if d.get("int8"):
+                calib = d.get("calib_dir")
+                n = len(calib_frames(calib))
+                if n < MIN_CALIB_FRAMES:
+                    log.warning("INT8: в %s %d кадров из %d нужных — трекер в FP32 "
+                                "(сначала scripts/capture_calib.py)", calib, n, MIN_CALIB_FRAMES)
+                    calib = None
             try:
                 return Detector(d["weights"], dev, d["conf"], d["standard_classes"], d["tracker"],
-                                (h, imgsz), backend="openvino")
+                                (h, imgsz), backend="openvino", calib_dir=calib)
             except Exception:
                 log.exception("OpenVINO недоступен, трекер на PyTorch")
         return Detector(d["weights"], dev, d["conf"], d["standard_classes"], d["tracker"], imgsz)
@@ -231,6 +244,8 @@ class Assistant:
             if self.web:
                 self.web.stop()
             self.camera.close()
+            if hasattr(self._vlm, "close"):
+                self._vlm.close()  # llama-server — отдельный процесс
             cv2.destroyAllWindows()
 
     def _idle_loop(self) -> None:
