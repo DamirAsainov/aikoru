@@ -1,0 +1,8 @@
+# Минимум для юнит-тестов и линтера: без torch, моделей и аудио
+numpy
+opencv-python-headless
+pyyaml
+pytest
+ruff
+sounddevice
+pillow
